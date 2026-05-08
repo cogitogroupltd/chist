@@ -1,0 +1,31 @@
+[package]
+name = "chist"
+version = "0.3.0"
+edition = "2024"
+description = "Browse, search, and resume Claude Code chat sessions from your terminal"
+authors = ["George Crosby <george.crosby7522@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/cogitogroupltd/chist"
+homepage = "https://github.com/cogitogroupltd/chist"
+keywords = ["claude", "claude-code", "cli", "history", "ai"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "chist"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+glob = "0.3"
+dirs = "6"
+comfy-table = "7"
+regex = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
