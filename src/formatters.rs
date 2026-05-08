@@ -1,5 +1,5 @@
 use crate::models::{SessionDetail, SessionSummary};
-use comfy_table::{Table, ContentArrangement};
+use comfy_table::{ContentArrangement, Table};
 
 pub fn format_list_table(sessions: &[SessionSummary]) -> String {
     if sessions.is_empty() {
@@ -256,7 +256,11 @@ fn json_to_yaml(value: &serde_json::Value, indent: usize) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => {
             if s.contains('\n') || s.contains(':') || s.contains('#') {
-                format!("|\n{}{}", " ".repeat(indent + 2), s.replace('\n', &format!("\n{}", " ".repeat(indent + 2))))
+                format!(
+                    "|\n{}{}",
+                    " ".repeat(indent + 2),
+                    s.replace('\n', &format!("\n{}", " ".repeat(indent + 2)))
+                )
             } else {
                 s.clone()
             }

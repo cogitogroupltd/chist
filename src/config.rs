@@ -9,24 +9,22 @@ pub struct Config {
 
 impl Config {
     pub fn load(config_file: Option<&Path>) -> Self {
-        let config_path = config_file
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                // XDG-style default: ~/.config/chist/config.yaml
-                // Falls back to ~/.chist.yaml for users who prefer that, then to the
-                // legacy ~/.claudehist.yaml location for back-compat with the pre-rename tool.
-                let home = dirs::home_dir().unwrap_or_default();
-                let candidates = [
-                    home.join(".config/chist/config.yaml"),
-                    home.join(".chist.yaml"),
-                    home.join(".claudehist.yaml"),
-                ];
-                candidates
-                    .iter()
-                    .find(|p| p.exists())
-                    .cloned()
-                    .unwrap_or_else(|| candidates[0].clone())
-            });
+        let config_path = config_file.map(PathBuf::from).unwrap_or_else(|| {
+            // XDG-style default: ~/.config/chist/config.yaml
+            // Falls back to ~/.chist.yaml for users who prefer that, then to the
+            // legacy ~/.claudehist.yaml location for back-compat with the pre-rename tool.
+            let home = dirs::home_dir().unwrap_or_default();
+            let candidates = [
+                home.join(".config/chist/config.yaml"),
+                home.join(".chist.yaml"),
+                home.join(".claudehist.yaml"),
+            ];
+            candidates
+                .iter()
+                .find(|p| p.exists())
+                .cloned()
+                .unwrap_or_else(|| candidates[0].clone())
+        });
 
         let data = Self::load_yaml(&config_path);
 
@@ -34,12 +32,11 @@ impl Config {
             .ok()
             .map(PathBuf::from)
             .or_else(|| {
-                data.get("claude_home")
-                    .and_then(|v| v.as_str())
-                    .map(|s| {
-                        let expanded = s.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
-                        PathBuf::from(expanded)
-                    })
+                data.get("claude_home").and_then(|v| v.as_str()).map(|s| {
+                    let expanded =
+                        s.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
+                    PathBuf::from(expanded)
+                })
             })
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".claude"));
 
@@ -98,8 +95,8 @@ impl Config {
             }
 
             // Check for list item
-            if trimmed.starts_with("- ") {
-                let val = trimmed[2..].trim();
+            if let Some(stripped) = trimmed.strip_prefix("- ") {
+                let val = stripped.trim();
                 list_items.push(serde_json::Value::String(val.to_string()));
                 in_list = true;
                 continue;
@@ -108,10 +105,7 @@ impl Config {
             // Flush any pending list
             if in_list {
                 if let Some(ref key) = current_key {
-                    map.insert(
-                        key.clone(),
-                        serde_json::Value::Array(list_items.clone()),
-                    );
+                    map.insert(key.clone(), serde_json::Value::Array(list_items.clone()));
                 }
                 list_items.clear();
                 in_list = false;
@@ -123,9 +117,13 @@ impl Config {
                     let val = v.trim();
                     // Try parsing as number
                     if let Ok(n) = val.parse::<u64>() {
-                        defaults_map.insert(k.trim().to_string(), serde_json::Value::Number(n.into()));
+                        defaults_map
+                            .insert(k.trim().to_string(), serde_json::Value::Number(n.into()));
                     } else {
-                        defaults_map.insert(k.trim().to_string(), serde_json::Value::String(val.to_string()));
+                        defaults_map.insert(
+                            k.trim().to_string(),
+                            serde_json::Value::String(val.to_string()),
+                        );
                     }
                 }
                 continue;
@@ -160,10 +158,8 @@ impl Config {
         }
 
         // Flush
-        if in_list {
-            if let Some(ref key) = current_key {
-                map.insert(key.clone(), serde_json::Value::Array(list_items));
-            }
+        if in_list && let Some(ref key) = current_key {
+            map.insert(key.clone(), serde_json::Value::Array(list_items));
         }
         if in_defaults {
             map.insert(

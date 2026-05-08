@@ -7,13 +7,12 @@ mod session_reader;
 use clap::{Parser, Subcommand};
 use config::Config;
 use formatters::{
-    format_detail_json, format_detail_text, format_detail_yaml, format_list_json,
-    format_list_table,
+    format_detail_json, format_detail_text, format_detail_yaml, format_list_json, format_list_table,
 };
 use session_reader::SessionReader;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process;
-use std::io::{self, Write};
 
 #[derive(Parser)]
 #[command(
@@ -130,7 +129,14 @@ fn main() {
     // -r <id> is a shorthand for `exec <id>`
     if let Some(ref id) = cli.resume {
         let config = Config::load(cli.config.as_deref());
-        cmd_exec(&config, Some(id.clone()), false, false, false, cli.execute.as_deref());
+        cmd_exec(
+            &config,
+            Some(id.clone()),
+            false,
+            false,
+            false,
+            cli.execute.as_deref(),
+        );
         return;
     }
 
@@ -201,10 +207,10 @@ fn cmd_exec(
             (s.session_id, s.project_path)
         } else {
             // Fall back: scan all session summaries for matching ID prefix or slug
-            let sessions = reader.list_sessions(None, None, config.allowed_projects.as_deref(), include_tmp);
+            let sessions =
+                reader.list_sessions(None, None, config.allowed_projects.as_deref(), include_tmp);
             let found = sessions.iter().find(|s| {
-                s.session_id.starts_with(id.as_str())
-                    || s.slug.as_deref() == Some(id.as_str())
+                s.session_id.starts_with(id.as_str()) || s.slug.as_deref() == Some(id.as_str())
             });
             if let Some(s) = found {
                 (s.session_id.clone(), s.project_path.clone())
@@ -231,14 +237,18 @@ fn cmd_exec(
     let out = io::stdout();
     let mut out = out.lock();
     if let Some(prompt) = execute {
-        let _ = writeln!(out, "cd {} && claude {} {} -p {}",
+        let _ = writeln!(
+            out,
+            "cd {} && claude {} {} -p {}",
             shell_escape(&resume_dir),
             if fork { "-rf" } else { "-r" },
             shell_escape(&session_id),
             shell_escape(prompt),
         );
     } else {
-        let _ = writeln!(out, "cd {} && claude {} {}",
+        let _ = writeln!(
+            out,
+            "cd {} && claude {} {}",
             shell_escape(&resume_dir),
             if fork { "-rf" } else { "-r" },
             shell_escape(&session_id),
@@ -248,7 +258,9 @@ fn cmd_exec(
 
 fn shell_escape(s: &str) -> String {
     // If the string is safe, return as-is; otherwise single-quote it
-    if s.chars().all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_' || c == '.') {
+    if s.chars()
+        .all(|c| c.is_alphanumeric() || c == '/' || c == '-' || c == '_' || c == '.')
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
