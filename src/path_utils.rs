@@ -67,10 +67,10 @@ pub fn matches_allowed_projects(project_path: &str, allowed_patterns: Option<&[S
 
     for pattern in patterns {
         let expanded = pattern.replace('~', &home_str);
-        if let Ok(glob_pattern) = glob::Pattern::new(&expanded) {
-            if glob_pattern.matches(project_path) {
-                return true;
-            }
+        if let Ok(glob_pattern) = glob::Pattern::new(&expanded)
+            && glob_pattern.matches(project_path)
+        {
+            return true;
         }
     }
     false
@@ -81,4 +81,37 @@ pub fn matches_allowed_projects(project_path: &str, allowed_patterns: Option<&[S
 pub fn is_tmp_session(project_path: &str) -> bool {
     // /tmp/... should be hidden, but /home/*/tmp/... should NOT
     project_path.starts_with("/tmp/") || project_path == "/tmp"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_to_dir_name_replaces_slashes() {
+        assert_eq!(path_to_claude_dir_name("/home/foo/bar"), "-home-foo-bar");
+        assert_eq!(path_to_claude_dir_name("/tmp"), "-tmp");
+    }
+
+    #[test]
+    fn project_name_uses_last_two_components() {
+        assert_eq!(get_project_name("/home/alice/dev/widget"), "dev/widget");
+        assert_eq!(get_project_name("/home/alice"), "home/alice");
+        assert_eq!(get_project_name("/widget"), "widget");
+        assert_eq!(get_project_name(""), "");
+    }
+
+    #[test]
+    fn tmp_check_excludes_user_tmp() {
+        assert!(is_tmp_session("/tmp/foo"));
+        assert!(is_tmp_session("/tmp"));
+        assert!(!is_tmp_session("/home/alice/tmp/foo"));
+        assert!(!is_tmp_session("/var/tmp/foo"));
+    }
+
+    #[test]
+    fn allowed_projects_none_means_anything_goes() {
+        assert!(matches_allowed_projects("/anywhere", None));
+        assert!(matches_allowed_projects("/anywhere", Some(&[])));
+    }
 }

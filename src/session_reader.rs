@@ -22,8 +22,12 @@ fn count_descendants(root_pid: u64) -> usize {
     let mut parent_of: HashMap<u64, u64> = HashMap::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(pid_str) = name.to_str() else { continue };
-        let Ok(pid) = pid_str.parse::<u64>() else { continue };
+        let Some(pid_str) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<u64>() else {
+            continue;
+        };
         let stat_path = format!("/proc/{pid}/stat");
         if let Ok(stat) = fs::read_to_string(&stat_path) {
             // Format: "pid (comm) state ppid ..."
@@ -135,11 +139,24 @@ impl SessionReader {
             if !Path::new(&format!("/proc/{pid}")).exists() {
                 continue;
             }
-            let sid = data.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let cwd = data.get("cwd").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let sid = data
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let cwd = data
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let started_at = data.get("startedAt").and_then(|v| v.as_u64()).unwrap_or(0);
             if !sid.is_empty() {
-                running.push(RunningSession { session_id: sid, cwd, started_at, pid });
+                running.push(RunningSession {
+                    session_id: sid,
+                    cwd,
+                    started_at,
+                    pid,
+                });
             }
         }
         running
@@ -147,12 +164,18 @@ impl SessionReader {
 
     /// Extract map of running session ID → PID.
     fn running_session_map(running: &[RunningSession]) -> HashMap<String, u64> {
-        running.iter().map(|r| (r.session_id.clone(), r.pid)).collect()
+        running
+            .iter()
+            .map(|r| (r.session_id.clone(), r.pid))
+            .collect()
     }
 
     fn get_slug_from_jsonl(&self, session_id: &str, project_path: &str) -> Option<String> {
         let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self.projects_dir.join(&dir_name).join(format!("{session_id}.jsonl"));
+        let jsonl_path = self
+            .projects_dir
+            .join(&dir_name)
+            .join(format!("{session_id}.jsonl"));
 
         let file = fs::File::open(&jsonl_path).ok()?;
         let reader = BufReader::new(file);
@@ -165,54 +188,49 @@ impl SessionReader {
 
             // Auto-generated slug appears in the first ~20 lines
             if i <= 20 && auto_slug.is_none() {
-                if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                    if let Some(slug) = data.get("slug").and_then(|v| v.as_str()) {
-                        auto_slug = Some(slug.to_string());
-                    }
+                if let Ok(data) = serde_json::from_str::<Value>(&line)
+                    && let Some(slug) = data.get("slug").and_then(|v| v.as_str())
+                {
+                    auto_slug = Some(slug.to_string());
                 }
                 continue;
             }
 
             // Only parse lines that contain "custom-title" (cheap string check
             // avoids JSON-parsing every line in large session files).
-            if line.contains("\"custom-title\"") {
-                if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                    if data.get("type").and_then(|v| v.as_str()) == Some("custom-title") {
-                        if let Some(title) = data.get("customTitle").and_then(|v| v.as_str()) {
-                            custom_title = Some(title.to_string());
-                        }
-                    }
-                }
+            if line.contains("\"custom-title\"")
+                && let Ok(data) = serde_json::from_str::<Value>(&line)
+                && data.get("type").and_then(|v| v.as_str()) == Some("custom-title")
+                && let Some(title) = data.get("customTitle").and_then(|v| v.as_str())
+            {
+                custom_title = Some(title.to_string());
             }
         }
         custom_title.or(auto_slug)
     }
 
-    fn get_last_message_from_jsonl(
-        &self,
-        session_id: &str,
-        project_path: &str,
-    ) -> Option<String> {
+    fn get_last_message_from_jsonl(&self, session_id: &str, project_path: &str) -> Option<String> {
         let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self.projects_dir.join(&dir_name).join(format!("{session_id}.jsonl"));
+        let jsonl_path = self
+            .projects_dir
+            .join(&dir_name)
+            .join(format!("{session_id}.jsonl"));
 
         let file = fs::File::open(&jsonl_path).ok()?;
         let reader = BufReader::new(file);
         let mut last_user_message: Option<String> = None;
 
-        for line in reader.lines().flatten() {
-            if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                if data.get("type").and_then(|v| v.as_str()) == Some("user") {
-                    if let Some(content) = data
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_str())
-                    {
-                        let trimmed = content.trim();
-                        if !trimmed.is_empty() {
-                            last_user_message = Some(trimmed.to_string());
-                        }
-                    }
+        for line in reader.lines().map_while(Result::ok) {
+            if let Ok(data) = serde_json::from_str::<Value>(&line)
+                && data.get("type").and_then(|v| v.as_str()) == Some("user")
+                && let Some(content) = data
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+            {
+                let trimmed = content.trim();
+                if !trimmed.is_empty() {
+                    last_user_message = Some(trimmed.to_string());
                 }
             }
         }
@@ -224,25 +242,23 @@ impl SessionReader {
     /// will record the newer cwd on later messages. Falling back to the *last* cwd gives
     /// `chist exec` a better chance of landing the resume in the right place than the
     /// JSONL parent directory does (which only records where `claude` was first launched).
-    pub fn get_last_cwd_from_jsonl(
-        &self,
-        session_id: &str,
-        project_path: &str,
-    ) -> Option<String> {
+    pub fn get_last_cwd_from_jsonl(&self, session_id: &str, project_path: &str) -> Option<String> {
         let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self.projects_dir.join(&dir_name).join(format!("{session_id}.jsonl"));
+        let jsonl_path = self
+            .projects_dir
+            .join(&dir_name)
+            .join(format!("{session_id}.jsonl"));
 
         let file = fs::File::open(&jsonl_path).ok()?;
         let reader = BufReader::new(file);
         let mut last_cwd: Option<String> = None;
 
-        for line in reader.lines().flatten() {
-            if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                if let Some(cwd) = data.get("cwd").and_then(|v| v.as_str()) {
-                    if !cwd.is_empty() {
-                        last_cwd = Some(cwd.to_string());
-                    }
-                }
+        for line in reader.lines().map_while(Result::ok) {
+            if let Ok(data) = serde_json::from_str::<Value>(&line)
+                && let Some(cwd) = data.get("cwd").and_then(|v| v.as_str())
+                && !cwd.is_empty()
+            {
+                last_cwd = Some(cwd.to_string());
             }
         }
         last_cwd
@@ -254,19 +270,21 @@ impl SessionReader {
         project_path: &str,
     ) -> Option<String> {
         let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self.projects_dir.join(&dir_name).join(format!("{session_id}.jsonl"));
+        let jsonl_path = self
+            .projects_dir
+            .join(&dir_name)
+            .join(format!("{session_id}.jsonl"));
 
         let file = fs::File::open(&jsonl_path).ok()?;
         let reader = BufReader::new(file);
         let mut last_ts: Option<String> = None;
 
-        for line in reader.lines().flatten() {
-            if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                if let Some(ts) = data.get("timestamp").and_then(|v| v.as_str()) {
-                    if !ts.is_empty() {
-                        last_ts = Some(ts.to_string());
-                    }
-                }
+        for line in reader.lines().map_while(Result::ok) {
+            if let Ok(data) = serde_json::from_str::<Value>(&line)
+                && let Some(ts) = data.get("timestamp").and_then(|v| v.as_str())
+                && !ts.is_empty()
+            {
+                last_ts = Some(ts.to_string());
             }
         }
         last_ts
@@ -320,17 +338,17 @@ impl SessionReader {
                 .to_string_lossy()
                 .to_string();
 
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                if let Ok(data) = serde_json::from_str::<Value>(&content) {
-                    let project_path = data
-                        .get("project_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if let Some(found) = self.get_slug_for_session(&session_id, project_path) {
-                        if found == slug {
-                            return Some(session_id);
-                        }
-                    }
+            if let Ok(content) = fs::read_to_string(entry.path())
+                && let Ok(data) = serde_json::from_str::<Value>(&content)
+            {
+                let project_path = data
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if let Some(found) = self.get_slug_for_session(&session_id, project_path)
+                    && found == slug
+                {
+                    return Some(session_id);
                 }
             }
         }
@@ -338,8 +356,8 @@ impl SessionReader {
     }
 
     fn find_session_by_prefix(&self, prefix: &str) -> Option<String> {
-        if self.session_meta_dir.exists() {
-            if let Some(found) = fs::read_dir(&self.session_meta_dir)
+        if self.session_meta_dir.exists()
+            && let Some(found) = fs::read_dir(&self.session_meta_dir)
                 .ok()
                 .into_iter()
                 .flatten()
@@ -353,9 +371,8 @@ impl SessionReader {
                     }
                 })
                 .next()
-            {
-                return Some(found);
-            }
+        {
+            return Some(found);
         }
         // Fallback: meta cache missing this id — scan project JSONLs.
         self.find_session_in_projects(prefix).map(|(id, _)| id)
@@ -385,8 +402,7 @@ impl SessionReader {
                 if path.extension().is_none_or(|e| e != "jsonl") {
                     continue;
                 }
-                let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string())
-                else {
+                let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().to_string()) else {
                     continue;
                 };
                 if stem.starts_with("agent-") {
@@ -430,34 +446,33 @@ impl SessionReader {
             let Ok(data) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if start_time.is_empty() {
-                if let Some(ts) = data.get("timestamp").and_then(|v| v.as_str()) {
-                    start_time = ts.to_string();
-                }
+            if start_time.is_empty()
+                && let Some(ts) = data.get("timestamp").and_then(|v| v.as_str())
+            {
+                start_time = ts.to_string();
             }
-            if git_branch.is_none() {
-                if let Some(b) = data.get("gitBranch").and_then(|v| v.as_str()) {
-                    git_branch = Some(b.to_string());
-                }
+            if git_branch.is_none()
+                && let Some(b) = data.get("gitBranch").and_then(|v| v.as_str())
+            {
+                git_branch = Some(b.to_string());
             }
-            if summary.is_none() {
-                if let Some(s) = data.get("summary").and_then(|v| v.as_str()) {
-                    summary = Some(s.to_string());
-                }
+            if summary.is_none()
+                && let Some(s) = data.get("summary").and_then(|v| v.as_str())
+            {
+                summary = Some(s.to_string());
             }
             match data.get("type").and_then(|v| v.as_str()) {
                 Some("user") => {
                     user_count += 1;
-                    if first_prompt.is_empty() {
-                        if let Some(c) = data
+                    if first_prompt.is_empty()
+                        && let Some(c) = data
                             .get("message")
                             .and_then(|m| m.get("content"))
                             .and_then(|c| c.as_str())
-                        {
-                            let t = c.trim();
-                            if !t.is_empty() {
-                                first_prompt = t.to_string();
-                            }
+                    {
+                        let t = c.trim();
+                        if !t.is_empty() {
+                            first_prompt = t.to_string();
                         }
                     }
                 }
@@ -479,10 +494,10 @@ impl SessionReader {
                         .and_then(|c| c.as_array())
                     {
                         for item in arr {
-                            if item.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-                                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                                    *tool_counts.entry(name.to_string()).or_insert(0) += 1;
-                                }
+                            if item.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                                && let Some(name) = item.get("name").and_then(|v| v.as_str())
+                            {
+                                *tool_counts.entry(name.to_string()).or_insert(0) += 1;
                             }
                         }
                     }
@@ -530,7 +545,10 @@ impl SessionReader {
 
     fn get_git_branch(&self, session_id: &str, project_path: &str) -> Option<String> {
         let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self.projects_dir.join(&dir_name).join(format!("{session_id}.jsonl"));
+        let jsonl_path = self
+            .projects_dir
+            .join(&dir_name)
+            .join(format!("{session_id}.jsonl"));
 
         let file = fs::File::open(&jsonl_path).ok()?;
         let reader = BufReader::new(file);
@@ -539,12 +557,11 @@ impl SessionReader {
             if i > 20 {
                 break;
             }
-            if let Ok(line) = line {
-                if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                    if let Some(branch) = data.get("gitBranch").and_then(|v| v.as_str()) {
-                        return Some(branch.to_string());
-                    }
-                }
+            if let Ok(line) = line
+                && let Ok(data) = serde_json::from_str::<Value>(&line)
+                && let Some(branch) = data.get("gitBranch").and_then(|v| v.as_str())
+            {
+                return Some(branch.to_string());
             }
         }
         None
@@ -558,7 +575,10 @@ impl SessionReader {
 
     fn get_jsonl_file_size(&self, session_id: &str, project_path: &str) -> Option<u64> {
         let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self.projects_dir.join(&dir_name).join(format!("{session_id}.jsonl"));
+        let jsonl_path = self
+            .projects_dir
+            .join(&dir_name)
+            .join(format!("{session_id}.jsonl"));
         fs::metadata(&jsonl_path).ok().map(|m| m.len())
     }
 
@@ -570,18 +590,24 @@ impl SessionReader {
     ///   (a tool subprocess like bash/sleep/curl is executing)
     ///
     /// Otherwise the session is "Idle" — alive but sitting at the prompt.
-    fn status_for_running_session(&self, session_id: &str, project_path: &str, pid: u64) -> SessionStatus {
+    fn status_for_running_session(
+        &self,
+        session_id: &str,
+        project_path: &str,
+        pid: u64,
+    ) -> SessionStatus {
         // Signal 1: JSONL recently modified → actively exchanging messages
         let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self.projects_dir.join(&dir_name).join(format!("{session_id}.jsonl"));
-        if let Ok(meta) = fs::metadata(&jsonl_path) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(elapsed) = SystemTime::now().duration_since(modified) {
-                    if elapsed < ACTIVE_THRESHOLD {
-                        return SessionStatus::Running;
-                    }
-                }
-            }
+        let jsonl_path = self
+            .projects_dir
+            .join(&dir_name)
+            .join(format!("{session_id}.jsonl"));
+        if let Ok(meta) = fs::metadata(&jsonl_path)
+            && let Ok(modified) = meta.modified()
+            && let Ok(elapsed) = SystemTime::now().duration_since(modified)
+            && elapsed < ACTIVE_THRESHOLD
+        {
+            return SessionStatus::Running;
         }
 
         // Signal 2: process tree has more than the baseline claude + node pair.
@@ -617,73 +643,214 @@ impl SessionReader {
         let mut seen: HashSet<String> = HashSet::new();
 
         // Read sessions from metadata files
-        if self.session_meta_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&self.session_meta_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_none_or(|e| e != "json") {
+        if self.session_meta_dir.exists()
+            && let Ok(entries) = fs::read_dir(&self.session_meta_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
+                }
+
+                let Ok(content) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(data) = serde_json::from_str::<Value>(&content) else {
+                    continue;
+                };
+
+                let session_id = data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or(""))
+                    .to_string();
+
+                let project_path = data
+                    .get("project_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if !self.should_include(&project_path, include_tmp) {
+                    continue;
+                }
+
+                if !matches_allowed_projects(&project_path, allowed_projects) {
+                    continue;
+                }
+
+                let project_name = get_project_name(&project_path);
+
+                if let Some(filter) = project_filter
+                    && !project_name.to_lowercase().contains(&filter.to_lowercase())
+                {
+                    continue;
+                }
+
+                let slug = self.get_slug_for_session(&session_id, &project_path);
+                let last_msg = self
+                    .get_last_message_from_jsonl(&session_id, &project_path)
+                    .map(|m| truncate(&m, 100));
+                let cache_start_time = data
+                    .get("start_time")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let last_activity = self
+                    .get_last_timestamp_from_jsonl(&session_id, &project_path)
+                    .unwrap_or_else(|| cache_start_time.clone());
+                let first_prompt = truncate(
+                    data.get("first_prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    100,
+                );
+                let file_size = self.get_jsonl_file_size(&session_id, &project_path);
+                let git_branch = self.get_git_branch(&session_id, &project_path);
+
+                let status = if let Some(&pid) = running_map.get(&session_id) {
+                    self.status_for_running_session(&session_id, &project_path, pid)
+                } else {
+                    SessionStatus::Stopped
+                };
+                sessions.push(SessionSummary {
+                    session_id: session_id.clone(),
+                    slug,
+                    project_path,
+                    project_name,
+                    start_time: cache_start_time,
+                    duration_minutes: data
+                        .get("duration_minutes")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    user_message_count: data
+                        .get("user_message_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    assistant_message_count: data
+                        .get("assistant_message_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    first_prompt,
+                    last_message: last_msg,
+                    summary: data
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    file_size_bytes: file_size,
+                    git_branch,
+                    status,
+                    last_activity,
+                });
+                seen.insert(session_id);
+            }
+        }
+
+        // Scan project dirs for JSONL-only sessions
+        if self.projects_dir.exists()
+            && let Ok(entries) = fs::read_dir(&self.projects_dir)
+        {
+            for entry in entries.flatten() {
+                let dir_path = entry.path();
+                if !dir_path.is_dir() {
+                    continue;
+                }
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if dir_name.starts_with('.') {
+                    continue;
+                }
+
+                let project_path = claude_dir_name_to_path(&dir_name);
+
+                if !self.should_include(&project_path, include_tmp) {
+                    continue;
+                }
+
+                if !matches_allowed_projects(&project_path, allowed_projects) {
+                    continue;
+                }
+
+                let project_name = get_project_name(&project_path);
+                if let Some(filter) = project_filter
+                    && !project_name.to_lowercase().contains(&filter.to_lowercase())
+                {
+                    continue;
+                }
+
+                let Ok(jsonl_entries) = fs::read_dir(&dir_path) else {
+                    continue;
+                };
+
+                for jsonl_entry in jsonl_entries.flatten() {
+                    let jsonl_path = jsonl_entry.path();
+                    if jsonl_path.extension().is_none_or(|e| e != "jsonl") {
                         continue;
                     }
 
-                    let Ok(content) = fs::read_to_string(&path) else {
-                        continue;
-                    };
-                    let Ok(data) = serde_json::from_str::<Value>(&content) else {
-                        continue;
-                    };
-
-                    let session_id = data
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_else(|| {
-                            path.file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("")
-                        })
+                    let session_id = jsonl_path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
                         .to_string();
 
-                    let project_path = data
-                        .get("project_path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    if !self.should_include(&project_path, include_tmp) {
+                    if session_id.starts_with("agent-") || seen.contains(&session_id) {
                         continue;
                     }
 
-                    if !matches_allowed_projects(&project_path, allowed_projects) {
+                    // Parse JSONL for basic info
+                    let Ok(file) = fs::File::open(&jsonl_path) else {
                         continue;
-                    }
+                    };
+                    let buf = BufReader::new(file);
 
-                    let project_name = get_project_name(&project_path);
+                    let slug = self.get_slug_for_session(&session_id, &project_path);
+                    let mut first_prompt = String::new();
+                    let mut last_msg: Option<String> = None;
+                    let mut user_count = 0u64;
+                    let mut assistant_count = 0u64;
+                    let mut start_time = String::new();
+                    let mut last_activity = String::new();
+                    let mut git_branch: Option<String> = None;
 
-                    if let Some(filter) = project_filter {
-                        if !project_name.to_lowercase().contains(&filter.to_lowercase()) {
-                            continue;
+                    for line in buf.lines().map_while(Result::ok) {
+                        if let Ok(data) = serde_json::from_str::<Value>(&line) {
+                            if let Some(ts) = data.get("timestamp").and_then(|v| v.as_str())
+                                && !ts.is_empty()
+                            {
+                                if start_time.is_empty() {
+                                    start_time = ts.to_string();
+                                }
+                                last_activity = ts.to_string();
+                            }
+                            if git_branch.is_none()
+                                && let Some(b) = data.get("gitBranch").and_then(|v| v.as_str())
+                            {
+                                git_branch = Some(b.to_string());
+                            }
+                            match data.get("type").and_then(|v| v.as_str()) {
+                                Some("user") => {
+                                    user_count += 1;
+                                    if let Some(content) = data
+                                        .get("message")
+                                        .and_then(|m| m.get("content"))
+                                        .and_then(|c| c.as_str())
+                                    {
+                                        let t = content.trim();
+                                        if !t.is_empty() {
+                                            if first_prompt.is_empty() {
+                                                first_prompt = t.to_string();
+                                            }
+                                            last_msg = Some(t.to_string());
+                                        }
+                                    }
+                                }
+                                Some("assistant") => assistant_count += 1,
+                                _ => {}
+                            }
                         }
                     }
 
-                    let slug = self.get_slug_for_session(&session_id, &project_path);
-                    let last_msg = self
-                        .get_last_message_from_jsonl(&session_id, &project_path)
-                        .map(|m| truncate(&m, 100));
-                    let cache_start_time = data
-                        .get("start_time")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let last_activity = self
-                        .get_last_timestamp_from_jsonl(&session_id, &project_path)
-                        .unwrap_or_else(|| cache_start_time.clone());
-                    let first_prompt = truncate(
-                        data.get("first_prompt")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(""),
-                        100,
-                    );
-                    let file_size = self.get_jsonl_file_size(&session_id, &project_path);
-                    let git_branch = self.get_git_branch(&session_id, &project_path);
+                    let file_size = fs::metadata(&jsonl_path).ok().map(|m| m.len());
 
                     let status = if let Some(&pid) = running_map.get(&session_id) {
                         self.status_for_running_session(&session_id, &project_path, pid)
@@ -693,168 +860,25 @@ impl SessionReader {
                     sessions.push(SessionSummary {
                         session_id: session_id.clone(),
                         slug,
-                        project_path,
-                        project_name,
-                        start_time: cache_start_time,
-                        duration_minutes: data
-                            .get("duration_minutes")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        user_message_count: data
-                            .get("user_message_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        assistant_message_count: data
-                            .get("assistant_message_count")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0),
-                        first_prompt,
-                        last_message: last_msg,
-                        summary: data
-                            .get("summary")
-                            .and_then(|v| v.as_str())
-                            .map(String::from),
+                        project_path: project_path.clone(),
+                        project_name: project_name.clone(),
+                        start_time: start_time.clone(),
+                        duration_minutes: 0,
+                        user_message_count: user_count,
+                        assistant_message_count: assistant_count,
+                        first_prompt: truncate(&first_prompt, 100),
+                        last_message: last_msg.map(|m| truncate(&m, 100)),
+                        summary: None,
                         file_size_bytes: file_size,
                         git_branch,
                         status,
-                        last_activity,
+                        last_activity: if last_activity.is_empty() {
+                            start_time
+                        } else {
+                            last_activity
+                        },
                     });
                     seen.insert(session_id);
-                }
-            }
-        }
-
-        // Scan project dirs for JSONL-only sessions
-        if self.projects_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&self.projects_dir) {
-                for entry in entries.flatten() {
-                    let dir_path = entry.path();
-                    if !dir_path.is_dir() {
-                        continue;
-                    }
-                    let dir_name = entry.file_name().to_string_lossy().to_string();
-                    if dir_name.starts_with('.') {
-                        continue;
-                    }
-
-                    let project_path = claude_dir_name_to_path(&dir_name);
-
-                    if !self.should_include(&project_path, include_tmp) {
-                        continue;
-                    }
-
-                    if !matches_allowed_projects(&project_path, allowed_projects) {
-                        continue;
-                    }
-
-                    let project_name = get_project_name(&project_path);
-                    if let Some(filter) = project_filter {
-                        if !project_name.to_lowercase().contains(&filter.to_lowercase()) {
-                            continue;
-                        }
-                    }
-
-                    let Ok(jsonl_entries) = fs::read_dir(&dir_path) else {
-                        continue;
-                    };
-
-                    for jsonl_entry in jsonl_entries.flatten() {
-                        let jsonl_path = jsonl_entry.path();
-                        if jsonl_path.extension().is_none_or(|e| e != "jsonl") {
-                            continue;
-                        }
-
-                        let session_id = jsonl_path
-                            .file_stem()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string();
-
-                        if session_id.starts_with("agent-") || seen.contains(&session_id) {
-                            continue;
-                        }
-
-                        // Parse JSONL for basic info
-                        let Ok(file) = fs::File::open(&jsonl_path) else {
-                            continue;
-                        };
-                        let buf = BufReader::new(file);
-
-                        let slug = self.get_slug_for_session(&session_id, &project_path);
-                        let mut first_prompt = String::new();
-                        let mut last_msg: Option<String> = None;
-                        let mut user_count = 0u64;
-                        let mut assistant_count = 0u64;
-                        let mut start_time = String::new();
-                        let mut last_activity = String::new();
-                        let mut git_branch: Option<String> = None;
-
-                        for line in buf.lines().flatten() {
-                            if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                                if let Some(ts) = data.get("timestamp").and_then(|v| v.as_str()) {
-                                    if !ts.is_empty() {
-                                        if start_time.is_empty() {
-                                            start_time = ts.to_string();
-                                        }
-                                        last_activity = ts.to_string();
-                                    }
-                                }
-                                if git_branch.is_none() {
-                                    if let Some(b) =
-                                        data.get("gitBranch").and_then(|v| v.as_str())
-                                    {
-                                        git_branch = Some(b.to_string());
-                                    }
-                                }
-                                match data.get("type").and_then(|v| v.as_str()) {
-                                    Some("user") => {
-                                        user_count += 1;
-                                        if let Some(content) = data
-                                            .get("message")
-                                            .and_then(|m| m.get("content"))
-                                            .and_then(|c| c.as_str())
-                                        {
-                                            let t = content.trim();
-                                            if !t.is_empty() {
-                                                if first_prompt.is_empty() {
-                                                    first_prompt = t.to_string();
-                                                }
-                                                last_msg = Some(t.to_string());
-                                            }
-                                        }
-                                    }
-                                    Some("assistant") => assistant_count += 1,
-                                    _ => {}
-                                }
-                            }
-                        }
-
-                        let file_size = fs::metadata(&jsonl_path).ok().map(|m| m.len());
-
-                        let status = if let Some(&pid) = running_map.get(&session_id) {
-                            self.status_for_running_session(&session_id, &project_path, pid)
-                        } else {
-                            SessionStatus::Stopped
-                        };
-                        sessions.push(SessionSummary {
-                            session_id: session_id.clone(),
-                            slug,
-                            project_path: project_path.clone(),
-                            project_name: project_name.clone(),
-                            start_time: start_time.clone(),
-                            duration_minutes: 0,
-                            user_message_count: user_count,
-                            assistant_message_count: assistant_count,
-                            first_prompt: truncate(&first_prompt, 100),
-                            last_message: last_msg.map(|m| truncate(&m, 100)),
-                            summary: None,
-                            file_size_bytes: file_size,
-                            git_branch,
-                            status,
-                            last_activity: if last_activity.is_empty() { start_time } else { last_activity },
-                        });
-                        seen.insert(session_id);
-                    }
                 }
             }
         }
@@ -910,8 +934,16 @@ impl SessionReader {
 
         // Sort by last_activity descending (falls back to start_time when last_activity is empty)
         sessions.sort_by(|a, b| {
-            let a_key = if a.last_activity.is_empty() { &a.start_time } else { &a.last_activity };
-            let b_key = if b.last_activity.is_empty() { &b.start_time } else { &b.last_activity };
+            let a_key = if a.last_activity.is_empty() {
+                &a.start_time
+            } else {
+                &a.last_activity
+            };
+            let b_key = if b.last_activity.is_empty() {
+                &b.start_time
+            } else {
+                &b.last_activity
+            };
             b_key.cmp(a_key)
         });
 
@@ -928,14 +960,11 @@ impl SessionReader {
         allowed_projects: Option<&[String]>,
         include_tmp: bool,
     ) -> Option<SessionDetail> {
-
-
         let session_id = if id_or_slug.len() == 36 {
             id_or_slug.to_string()
         } else {
             // Try slug first, then UUID prefix
-            self
-                .find_session_by_slug(id_or_slug)
+            self.find_session_by_slug(id_or_slug)
                 .or_else(|| self.find_session_by_prefix(id_or_slug))?
         };
 
@@ -1017,7 +1046,10 @@ impl SessionReader {
             user_message_count: u64_field(&data, "user_message_count"),
             assistant_message_count: u64_field(&data, "assistant_message_count"),
             first_prompt: str_field(&data, "first_prompt"),
-            summary: data.get("summary").and_then(|v| v.as_str()).map(String::from),
+            summary: data
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .map(String::from),
             git_branch,
             git_commits: u64_field(&data, "git_commits"),
             git_pushes: u64_field(&data, "git_pushes"),
@@ -1077,8 +1109,6 @@ impl SessionReader {
         allowed_projects: Option<&[String]>,
         include_tmp: bool,
     ) -> Vec<SessionSummary> {
-
-
         let regex_pattern = if use_regex {
             pattern.to_string()
         } else {
@@ -1090,7 +1120,7 @@ impl SessionReader {
                 .case_insensitive(true)
                 .build()
         } else {
-            regex::Regex::new(&regex_pattern).map_err(|e| e)
+            regex::Regex::new(&regex_pattern)
         };
 
         let Ok(re) = re else {
@@ -1175,21 +1205,19 @@ impl SessionReader {
                 let buf = BufReader::new(file);
                 let mut found = false;
 
-                for line in buf.lines().flatten() {
-                    if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                        if data.get("type").and_then(|v| v.as_str()) == Some("user") {
-                            if let Some(content) = data.get("message").and_then(|m| m.get("content"))
-                            {
-                                let text = if let Some(s) = content.as_str() {
-                                    s.to_string()
-                                } else {
-                                    content.to_string()
-                                };
-                                if re.is_match(&text) {
-                                    found = true;
-                                    break;
-                                }
-                            }
+                for line in buf.lines().map_while(Result::ok) {
+                    if let Ok(data) = serde_json::from_str::<Value>(&line)
+                        && data.get("type").and_then(|v| v.as_str()) == Some("user")
+                        && let Some(content) = data.get("message").and_then(|m| m.get("content"))
+                    {
+                        let text = if let Some(s) = content.as_str() {
+                            s.to_string()
+                        } else {
+                            content.to_string()
+                        };
+                        if re.is_match(&text) {
+                            found = true;
+                            break;
                         }
                     }
                 }
@@ -1255,20 +1283,20 @@ impl SessionReader {
                     let mut last_activity = String::new();
                     let mut git_branch: Option<String> = None;
 
-                    for line in buf.lines().flatten() {
+                    for line in buf.lines().map_while(Result::ok) {
                         if let Ok(data) = serde_json::from_str::<Value>(&line) {
-                            if let Some(ts) = data.get("timestamp").and_then(|v| v.as_str()) {
-                                if !ts.is_empty() {
-                                    if start_time.is_empty() {
-                                        start_time = ts.to_string();
-                                    }
-                                    last_activity = ts.to_string();
+                            if let Some(ts) = data.get("timestamp").and_then(|v| v.as_str())
+                                && !ts.is_empty()
+                            {
+                                if start_time.is_empty() {
+                                    start_time = ts.to_string();
                                 }
+                                last_activity = ts.to_string();
                             }
-                            if git_branch.is_none() {
-                                if let Some(b) = data.get("gitBranch").and_then(|v| v.as_str()) {
-                                    git_branch = Some(b.to_string());
-                                }
+                            if git_branch.is_none()
+                                && let Some(b) = data.get("gitBranch").and_then(|v| v.as_str())
+                            {
+                                git_branch = Some(b.to_string());
                             }
                             match data.get("type").and_then(|v| v.as_str()) {
                                 Some("user") => {
@@ -1314,15 +1342,27 @@ impl SessionReader {
                         } else {
                             SessionStatus::Stopped
                         },
-                        last_activity: if last_activity.is_empty() { start_time } else { last_activity },
+                        last_activity: if last_activity.is_empty() {
+                            start_time
+                        } else {
+                            last_activity
+                        },
                     });
                 }
             }
         }
 
         matching.sort_by(|a, b| {
-            let a_key = if a.last_activity.is_empty() { &a.start_time } else { &a.last_activity };
-            let b_key = if b.last_activity.is_empty() { &b.start_time } else { &b.last_activity };
+            let a_key = if a.last_activity.is_empty() {
+                &a.start_time
+            } else {
+                &a.last_activity
+            };
+            let b_key = if b.last_activity.is_empty() {
+                &b.start_time
+            } else {
+                &b.last_activity
+            };
             b_key.cmp(a_key)
         });
 
