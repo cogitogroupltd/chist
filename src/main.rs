@@ -224,14 +224,7 @@ fn cmd_exec(
         process::exit(1);
     };
 
-    // Prefer the last `cwd` recorded in the session's JSONL — sessions where the user
-    // started Claude in one dir but `cd`'d into a sub-project would otherwise resume at
-    // the original launch dir, which is rarely what's wanted. Fall back to project_path
-    // when the JSONL doesn't carry a cwd (older sessions or interrupted starts).
-    let resume_dir = reader
-        .get_last_cwd_from_jsonl(&session_id, &project_path)
-        .filter(|p| std::path::Path::new(p).is_dir())
-        .unwrap_or(project_path);
+    let resume_dir = project_path;
 
     // Output shell commands to stdout for eval
     let out = io::stdout();
