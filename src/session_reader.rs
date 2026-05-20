@@ -237,33 +237,6 @@ impl SessionReader {
         last_user_message
     }
 
-    /// Walk the JSONL and return the most recently-recorded `cwd` field.
-    /// Sessions started in one directory but where the user later `cd`'d to a sub-project
-    /// will record the newer cwd on later messages. Falling back to the *last* cwd gives
-    /// `chist exec` a better chance of landing the resume in the right place than the
-    /// JSONL parent directory does (which only records where `claude` was first launched).
-    pub fn get_last_cwd_from_jsonl(&self, session_id: &str, project_path: &str) -> Option<String> {
-        let dir_name = path_to_claude_dir_name(project_path);
-        let jsonl_path = self
-            .projects_dir
-            .join(&dir_name)
-            .join(format!("{session_id}.jsonl"));
-
-        let file = fs::File::open(&jsonl_path).ok()?;
-        let reader = BufReader::new(file);
-        let mut last_cwd: Option<String> = None;
-
-        for line in reader.lines().map_while(Result::ok) {
-            if let Ok(data) = serde_json::from_str::<Value>(&line)
-                && let Some(cwd) = data.get("cwd").and_then(|v| v.as_str())
-                && !cwd.is_empty()
-            {
-                last_cwd = Some(cwd.to_string());
-            }
-        }
-        last_cwd
-    }
-
     fn get_last_timestamp_from_jsonl(
         &self,
         session_id: &str,

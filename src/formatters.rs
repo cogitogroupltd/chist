@@ -20,17 +20,7 @@ pub fn format_list_table(sessions: &[SessionSummary]) -> String {
             session.session_id.clone()
         };
 
-        let alias = session
-            .slug
-            .as_deref()
-            .map(|s| {
-                if s.len() > 28 {
-                    format!("{}...", &s[..25])
-                } else {
-                    s.to_string()
-                }
-            })
-            .unwrap_or_default();
+        let alias = session.slug.as_deref().unwrap_or_default().to_string();
 
         let project = {
             let p = &session.project_path;
