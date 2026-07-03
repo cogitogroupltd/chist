@@ -107,6 +107,23 @@ $ eval "$(chist exec c00abb55)"
 # claude opens with the conversation restored
 ```
 
+`-r` (`--resume`) is a shorthand for `exec`, so you can resume without typing the subcommand:
+
+```
+$ chist -r c00abb55
+cd ~/dev/myco/api && claude -r c00abb55-5251-4db9-a6bb-8d72ea832873
+
+$ eval "$(chist -r c00abb55)"
+# same as `exec` — claude opens with the conversation restored
+```
+
+Add `-e` to run a single prompt non-interactively (maps to `claude -p`) instead of opening a shell:
+
+```
+$ chist -r c00abb55 -e 'summarise what we changed'
+cd ~/dev/myco/api && claude -r c00abb55-5251-4db9-a6bb-8d72ea832873 -p 'summarise what we changed'
+```
+
 If you don't want to type `eval` every time, drop a small wrapper into your shell:
 
 ```
