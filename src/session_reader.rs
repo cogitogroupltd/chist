@@ -1348,10 +1348,11 @@ impl SessionReader {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+        let head: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{}...", head)
     }
 }
 
@@ -1368,4 +1369,24 @@ fn u64_field(data: &Value, key: &str) -> u64 {
 
 fn bool_field(data: &Value, key: &str) -> bool {
     data.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate;
+
+    #[test]
+    fn does_not_panic_on_multibyte_boundary() {
+        // Em-dash is 3 bytes; a byte-index cut near the limit used to panic.
+        let s = format!("{}—tail", "x".repeat(96));
+        let out = truncate(&s, 100);
+        assert!(out.ends_with("..."));
+        assert!(out.chars().count() <= 100);
+    }
+
+    #[test]
+    fn short_strings_pass_through() {
+        assert_eq!(truncate("hello", 100), "hello");
+        assert_eq!(truncate("héllo—world", 100), "héllo—world");
+    }
 }
