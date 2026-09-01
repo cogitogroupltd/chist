@@ -1,13 +1,22 @@
+use std::fs;
 use std::path::Path;
 
 /// Convert a project path to Claude's directory naming convention.
-/// Example: /home/cogito/dev/foo -> -home-cogito-dev-foo
+/// Claude replaces every non-alphanumeric character with a dash.
+/// Example: /home/cogito/dev/foo.bar -> -home-cogito-dev-foo-bar
 pub fn path_to_claude_dir_name(project_path: &str) -> String {
-    project_path.replace('/', "-")
+    project_path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Convert Claude's directory name back to a path.
-/// Uses greedy algorithm to find longest existing path prefix.
+///
+/// The encoding is lossy — `.`, `_`, spaces and `/` all become `-` — so each
+/// component is recovered by looking for a real directory entry whose own
+/// encoded form matches the next run of parts, longest match first. Parts with
+/// no match on disk fall back to a plain dash-joined component.
 pub fn claude_dir_name_to_path(dir_name: &str) -> String {
     let stripped = dir_name.strip_prefix('-').unwrap_or(dir_name);
     let parts: Vec<&str> = stripped.split('-').collect();
@@ -16,29 +25,41 @@ pub fn claude_dir_name_to_path(dir_name: &str) -> String {
     let mut i = 0;
 
     while i < parts.len() {
-        let mut best_match = parts[i].to_string();
-        let mut best_len = 1;
-
-        // Try combining with subsequent parts (directory names with dashes)
-        let max_j = (i + 6).min(parts.len() + 1);
-        for j in (i + 1)..max_j {
-            let candidate: String = parts[i..j].join("-");
-            let test_path = format!("/{}", {
-                let mut v = result_parts.clone();
-                v.push(candidate.clone());
-                v.join("/")
-            });
-            if Path::new(&test_path).exists() {
-                best_match = candidate;
-                best_len = j - i;
+        let parent = format!("/{}", result_parts.join("/"));
+        match longest_entry_match(&parent, &parts[i..]) {
+            Some((name, len)) => {
+                result_parts.push(name);
+                i += len;
+            }
+            None => {
+                result_parts.push(parts[i].to_string());
+                i += 1;
             }
         }
-
-        result_parts.push(best_match);
-        i += best_len;
     }
 
     format!("/{}", result_parts.join("/"))
+}
+
+/// Find the entry in `parent` whose encoded name consumes the most leading
+/// `parts`. Returns the real entry name and how many parts it accounts for.
+fn longest_entry_match(parent: &str, parts: &[&str]) -> Option<(String, usize)> {
+    let entries = fs::read_dir(Path::new(parent)).ok()?;
+    let mut best: Option<(String, usize)> = None;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let encoded = path_to_claude_dir_name(&name);
+        let len = encoded.split('-').count();
+        if len > parts.len() || encoded.split('-').ne(parts[..len].iter().copied()) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(_, best_len)| len > *best_len) {
+            best = Some((name, len));
+        }
+    }
+
+    best
 }
 
 /// Extract project name (last 2 path components).
@@ -86,6 +107,73 @@ pub fn is_tmp_session(project_path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    /// Create a unique scratch dir under the system temp dir.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("chist-pathtest-{}-{}", std::process::id(), tag));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Claude's own encoding, spelled out independently of the code under test.
+    fn claude_encode(path: &str) -> String {
+        path.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+
+    fn round_trip(real: &std::path::Path) -> String {
+        let encoded = claude_encode(&real.to_string_lossy());
+        assert_eq!(encoded, path_to_claude_dir_name(&real.to_string_lossy()));
+        claude_dir_name_to_path(&encoded)
+    }
+
+    #[test]
+    fn path_to_dir_name_encodes_non_alphanumerics() {
+        assert_eq!(
+            path_to_claude_dir_name("/home/foo/bar.baz.qux"),
+            "-home-foo-bar-baz-qux"
+        );
+        assert_eq!(path_to_claude_dir_name("/home/a_b/c d"), "-home-a-b-c-d");
+    }
+
+    #[test]
+    fn dir_name_round_trips_path_with_dots() {
+        let root = scratch("dots");
+        let real = root.join("fior").join("fiordc.aigateway.fior.group");
+        fs::create_dir_all(&real).unwrap();
+        assert_eq!(round_trip(&real), real.to_string_lossy());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dir_name_round_trips_path_with_dashes() {
+        let root = scratch("dashes");
+        let real = root.join("dev").join("fior-mobileshield-v2");
+        fs::create_dir_all(&real).unwrap();
+        assert_eq!(round_trip(&real), real.to_string_lossy());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dir_name_round_trips_long_name_with_spaces_and_parens() {
+        let root = scratch("spaces");
+        let real = root.join("auditor-pack-Sealed-evidence-bundle-20260814093433 (3)");
+        fs::create_dir_all(&real).unwrap();
+        assert_eq!(round_trip(&real), real.to_string_lossy());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dir_name_for_missing_path_falls_back_to_dashes() {
+        assert_eq!(
+            claude_dir_name_to_path("-nonexistent-chist-project-dir"),
+            "/nonexistent/chist/project/dir"
+        );
+    }
 
     #[test]
     fn path_to_dir_name_replaces_slashes() {
