@@ -53,15 +53,18 @@ pub fn format_list_table(sessions: &[SessionSummary]) -> String {
         let branch = session
             .git_branch
             .as_deref()
-            .map(|b| if b.len() > 12 { &b[..12] } else { b })
+            .map(|b| {
+                let end = b.char_indices().nth(12).map(|(i, _)| i).unwrap_or(b.len());
+                &b[..end]
+            })
             .unwrap_or("");
 
         let message = session
             .last_message
             .as_deref()
             .unwrap_or(&session.first_prompt);
-        let message = if message.len() > 40 {
-            format!("{}...", &message[..37])
+        let message = if message.chars().count() > 40 {
+            format!("{}...", message.chars().take(37).collect::<String>())
         } else {
             message.to_string()
         };
