@@ -4,6 +4,36 @@ All notable changes will be documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `chist backup` — archives the Claude home to a backup directory as
+  `<prefix>_DD-MM-YYYY.tar.gz`, alongside a `claude_sessions_DD-MM-YYYY.json`
+  index of the sessions it contains. `--status` reports where archives live and
+  when the last one ran.
+- Automatic backups. Every invocation does one stat on a local stamp file and,
+  at most hourly, forks a detached low-priority process that decides whether a
+  backup is due. The archive directory is never touched in the foreground, so a
+  stalled cloud-sync mount cannot wedge the CLI. A lock file prevents overlap.
+  The default interval is `cleanupPeriodDays / 4`, capped at 7 days, so no
+  session can be created and reaped between two backups.
+- Archive fallback on a miss. `chist -r`, `exec` and `get` now search the
+  backup indexes when a session is not on disk, and offer to restore it —
+  the prompt goes to stderr and reads `/dev/tty`, so it works inside
+  `eval $(chist -r ...)`. `chist list -i` reports archive matches without
+  restoring. Restored sessions get a fresh mtime so Claude's cleanup pass does
+  not immediately reap them again.
+- `chist restore <query>` restores a session explicitly; `--list` shows what the
+  archives hold. When a session appears in several archives the freshest copy
+  wins. A session still present in `~/.claude` is never replaced by an older
+  archived copy without `--force`, and even then the live copy is kept as
+  `<uuid>.jsonl.replaced-<timestamp>`.
+- `backup:` section in the config, plus `CHIST_BACKUP_DIR` and
+  `CHIST_NO_AUTO_BACKUP`.
+
+### Changed
+- The config parser handles nested maps generally, rather than only `defaults:`.
+
 ## [0.3.0] — 2026-05-08
 
 First public release. The tool was previously developed as `cog-claudehist`

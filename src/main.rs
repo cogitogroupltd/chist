@@ -1,18 +1,25 @@
+mod archive;
+mod backup;
 mod config;
 mod formatters;
 mod models;
 mod path_utils;
 mod session_reader;
 
+use archive::{ArchiveStore, ArchivedSession, local_copy};
+use backup::human_days;
 use clap::{Parser, Subcommand};
-use config::Config;
+use config::{Config, RestoreMode};
 use formatters::{
     format_detail_json, format_detail_text, format_detail_yaml, format_list_json, format_list_table,
 };
 use session_reader::SessionReader;
-use std::io::{self, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process;
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -32,7 +39,10 @@ use std::process;
   chist get 3f4b4b02                      # Get by UUID prefix
   chist exec frolicking-stirring-unicorn   # Resume session in its project dir
   eval $(chist exec 3f4b4b02)              # Same, by UUID prefix
-  chist -r my-alias -e 'git status'        # Run one prompt non-interactively"#
+  chist -r my-alias -e 'git status'        # Run one prompt non-interactively
+  chist backup                             # Back up now
+  chist backup --status                    # When the last backup ran
+  chist restore dw-contract                # Pull a reaped session out of a backup"#
 )]
 struct Cli {
     /// Path to config file (default: ~/.config/chist/config.yaml)
@@ -121,6 +131,36 @@ enum Commands {
         #[arg(short = 'a', long = "all")]
         all: bool,
     },
+
+    /// Archive the Claude home to the backup directory
+    Backup {
+        /// Show where backups live and when the last one ran
+        #[arg(short, long)]
+        status: bool,
+
+        /// Back up only if one is due, quietly (used by the background runner)
+        #[arg(long, hide = true)]
+        daemon: bool,
+    },
+
+    /// Restore a session from a backup archive back into ~/.claude
+    Restore {
+        /// Session ID (UUID), UUID prefix, slug, or text to search for
+        query: Option<String>,
+
+        /// Show matching archived sessions without restoring anything
+        #[arg(short, long)]
+        list: bool,
+
+        /// Restore without asking
+        #[arg(short, long)]
+        yes: bool,
+
+        /// Replace a session that is still in ~/.claude (the live copy is kept
+        /// alongside as <uuid>.jsonl.replaced-<timestamp>)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 fn main() {
@@ -129,6 +169,7 @@ fn main() {
     // -r <id> is a shorthand for `exec <id>`
     if let Some(ref id) = cli.resume {
         let config = Config::load(cli.config.as_deref());
+        backup::maybe_spawn(&config);
         cmd_exec(
             &config,
             Some(id.clone()),
@@ -147,6 +188,11 @@ fn main() {
     };
 
     let config = Config::load(cli.config.as_deref());
+
+    // Backups are the one command that must not trigger a backup of its own.
+    if !matches!(command, Commands::Backup { .. }) {
+        backup::maybe_spawn(&config);
+    }
 
     match command {
         Commands::List {
@@ -170,6 +216,13 @@ fn main() {
             format,
             all,
         } => cmd_get(&config, id_or_slug, last, format, all),
+        Commands::Backup { status, daemon } => cmd_backup(&config, status, daemon),
+        Commands::Restore {
+            query,
+            list,
+            yes,
+            force,
+        } => cmd_restore(&config, query, list, yes, force),
     }
 }
 
@@ -203,20 +256,19 @@ fn cmd_exec(
             process::exit(1);
         }
     } else if let Some(ref id) = id_or_slug {
-        if let Some(s) = reader.get_session(id, config.allowed_projects.as_deref(), include_tmp) {
-            (s.session_id, s.project_path)
-        } else {
-            // Fall back: scan all session summaries for matching ID prefix or slug
-            let sessions =
-                reader.list_sessions(None, None, config.allowed_projects.as_deref(), include_tmp);
-            let found = sessions.iter().find(|s| {
-                s.session_id.starts_with(id.as_str()) || s.slug.as_deref() == Some(id.as_str())
-            });
-            if let Some(s) = found {
-                (s.session_id.clone(), s.project_path.clone())
-            } else {
-                eprintln!("Session not found: {}", id);
-                process::exit(1);
+        match locate(&reader, config, id, include_tmp) {
+            Some(found) => found,
+            None => {
+                // Not on disk any more — Claude may have reaped it. Look in the
+                // backups before giving up.
+                if restore_from_archive(config, id).is_some()
+                    && let Some(found) = locate(&reader, config, id, include_tmp)
+                {
+                    found
+                } else {
+                    eprintln!("Session not found: {}", id);
+                    process::exit(1);
+                }
             }
         }
     } else {
@@ -249,6 +301,25 @@ fn cmd_exec(
     }
 }
 
+/// Resolve an id/slug to (session_id, project_path) using the detail lookup
+/// first and a scan of session summaries second.
+fn locate(
+    reader: &SessionReader,
+    config: &Config,
+    id: &str,
+    include_tmp: bool,
+) -> Option<(String, String)> {
+    if let Some(s) = reader.get_session(id, config.allowed_projects.as_deref(), include_tmp) {
+        return Some((s.session_id, s.project_path));
+    }
+    let sessions =
+        reader.list_sessions(None, None, config.allowed_projects.as_deref(), include_tmp);
+    sessions
+        .iter()
+        .find(|s| s.session_id.starts_with(id) || s.slug.as_deref() == Some(id))
+        .map(|s| (s.session_id.clone(), s.project_path.clone()))
+}
+
 fn shell_escape(s: &str) -> String {
     // If the string is safe, return as-is; otherwise single-quote it
     if s.chars()
@@ -273,9 +344,9 @@ fn cmd_list(
     let limit = limit.unwrap_or(config.default_list_limit);
     let output_format = format.as_deref().unwrap_or(&config.default_format);
 
-    let sessions = if let Some(pattern) = search {
+    let sessions = if let Some(ref pattern) = search {
         reader.search_sessions(
-            &pattern,
+            pattern,
             use_regex,
             true,
             Some(limit),
@@ -293,6 +364,11 @@ fn cmd_list(
 
     if sessions.is_empty() {
         println!("No sessions found.");
+        // A search that finds nothing locally is exactly when a reaped session
+        // is being looked for. Say what the backups hold, without restoring.
+        if let Some(pattern) = search {
+            report_archive_matches(config, &pattern);
+        }
         return;
     }
 
@@ -311,7 +387,7 @@ fn cmd_get(
 ) {
     let reader = SessionReader::new(&config.claude_home);
 
-    let session = if last {
+    let mut session = if last {
         reader.get_last_session(config.allowed_projects.as_deref(), include_tmp)
     } else if let Some(ref id) = id_or_slug {
         reader.get_session(id, config.allowed_projects.as_deref(), include_tmp)
@@ -319,6 +395,13 @@ fn cmd_get(
         eprintln!("Error: Must specify session ID/slug or use --last");
         process::exit(1);
     };
+
+    if session.is_none()
+        && let Some(ref id) = id_or_slug
+        && restore_from_archive(config, id).is_some()
+    {
+        session = reader.get_session(id, config.allowed_projects.as_deref(), include_tmp);
+    }
 
     let Some(session) = session else {
         if last {
@@ -337,5 +420,293 @@ fn cmd_get(
         "json" => println!("{}", format_detail_json(&session)),
         "yaml" => println!("{}", format_detail_yaml(&session)),
         _ => println!("{}", format_detail_text(&session)),
+    }
+}
+
+fn cmd_backup(config: &Config, status: bool, daemon: bool) {
+    if status {
+        print!("{}", backup::status(config));
+        return;
+    }
+
+    if daemon {
+        // Background run: due-check inside, no output, never a non-zero exit
+        // that something could trip over.
+        let _ = backup::run(config, false);
+        return;
+    }
+
+    eprintln!("Backing up to {} …", config.backup.dir.display());
+    match backup::run(config, true) {
+        Ok(outcome) => {
+            if let Some(reason) = outcome.skipped {
+                println!("Skipped: {reason}");
+                return;
+            }
+            println!(
+                "✓ {} ({})",
+                outcome.archive.display(),
+                backup::human_bytes(outcome.bytes)
+            );
+            println!("✓ {}", outcome.index.display());
+        }
+        Err(e) => {
+            eprintln!("Backup failed: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+fn cmd_restore(config: &Config, query: Option<String>, list_only: bool, yes: bool, force: bool) {
+    let store = ArchiveStore::new(&config.backup);
+
+    let Some(query) = query else {
+        eprintln!("Error: Must specify a session ID, slug, or search text");
+        process::exit(1);
+    };
+
+    eprintln!("Searching backups in {} …", store.dir().display());
+    if !store.exists() {
+        eprintln!(
+            "No backup directory at {} — nothing to restore from.",
+            store.dir().display()
+        );
+        process::exit(1);
+    }
+
+    let mut hits = store.find(&query, true);
+    if hits.is_empty() {
+        hits = store.find(&query, false);
+    }
+
+    if hits.is_empty() {
+        println!("No archived session matches {query:?}.");
+        return;
+    }
+
+    if list_only || hits.len() > 1 {
+        println!("{}", describe(&hits));
+        if hits.len() > 1 {
+            println!("\nNarrow it down with a UUID prefix or slug to restore one.");
+        }
+        return;
+    }
+
+    let hit = &hits[0];
+
+    // The archived copy is always older than the live one. Restoring over a
+    // session that is still on disk throws away whatever has happened since,
+    // so it takes an explicit --force and never happens by way of -y.
+    if let Some(existing) = local_copy(&config.claude_home, &hit.entry.session_id)
+        && !force
+    {
+        let local = std::fs::metadata(&existing).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "{} is still in ~/.claude ({}, {}).",
+            hit.label(),
+            backup::human_bytes(local),
+            existing.display(),
+        );
+        eprintln!(
+            "The archived copy is older{}. Nothing restored — pass --force to replace it \n\
+             (the live copy is kept as <uuid>.jsonl.replaced-<timestamp>).",
+            match hit.last_active() {
+                Some(d) => format!(", last used {d}"),
+                None => String::new(),
+            }
+        );
+        process::exit(1);
+    }
+
+    if !yes && config.backup.restore != RestoreMode::Auto && !confirm_restore(hit) {
+        println!("Left it in the archive.");
+        return;
+    }
+
+    match store.restore(hit, &config.claude_home, force) {
+        Ok(path) => {
+            println!("✓ Restored {} → {}", hit.label(), path.display());
+            println!(
+                "  chist -r {}",
+                hit.entry.slug.clone().unwrap_or_else(|| hit.short_id())
+            );
+        }
+        Err(e) => {
+            eprintln!("Restore failed: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+/// Search the backups without letting an unresponsive backup directory wedge
+/// the caller. Returns `None` if the search did not answer in time — cloud-sync
+/// mounts stall, and a missing session is not worth hanging a terminal over.
+fn find_archived(
+    store: &ArchiveStore,
+    query: &str,
+    budget: Duration,
+) -> Option<Vec<ArchivedSession>> {
+    let (tx, rx) = mpsc::channel();
+    let store = store.clone();
+    let query = query.to_string();
+    std::thread::spawn(move || {
+        // exists() touches the mount too, so it belongs inside the budget.
+        let hits = if store.exists() {
+            let mut hits = store.find(&query, true);
+            if hits.is_empty() {
+                hits = store.find(&query, false);
+            }
+            hits
+        } else {
+            Vec::new()
+        };
+        let _ = tx.send(hits);
+    });
+
+    rx.recv_timeout(budget).ok()
+}
+
+/// Look for `id` in the backups and, with the user's agreement, put it back.
+/// Returns the restored session id. All chatter goes to stderr: `exec` writes a
+/// shell command to stdout and callers eval it.
+fn restore_from_archive(config: &Config, id: &str) -> Option<String> {
+    if config.backup.restore == RestoreMode::Never {
+        return None;
+    }
+    let store = ArchiveStore::new(&config.backup);
+
+    let Some(hits) = find_archived(&store, id, Duration::from_secs(15)) else {
+        eprintln!(
+            "(backups at {} did not respond — not searched)",
+            store.dir().display()
+        );
+        return None;
+    };
+    let hit = hits.first()?;
+
+    if config.backup.restore != RestoreMode::Auto && !confirm_restore(hit) {
+        return None;
+    }
+
+    eprintln!("Extracting from {} …", file_name(&hit.tarball));
+    match store.restore(hit, &config.claude_home, false) {
+        Ok(path) => {
+            eprintln!("✓ Restored {} → {}", hit.label(), path.display());
+            Some(hit.entry.session_id.clone())
+        }
+        Err(e) => {
+            eprintln!("Restore failed: {e}");
+            None
+        }
+    }
+}
+
+fn report_archive_matches(config: &Config, pattern: &str) {
+    if config.backup.restore == RestoreMode::Never {
+        return;
+    }
+    let store = ArchiveStore::new(&config.backup);
+    let Some(hits) = find_archived(&store, pattern, Duration::from_secs(10)) else {
+        return;
+    };
+    if hits.is_empty() {
+        return;
+    }
+    println!(
+        "\n{} in the backups at {}:\n{}",
+        if hits.len() == 1 {
+            "1 archived session matches".to_string()
+        } else {
+            format!("{} archived sessions match", hits.len())
+        },
+        store.dir().display(),
+        describe(&hits),
+    );
+    println!("\nRestore one with: chist restore <slug|uuid>");
+}
+
+fn describe(hits: &[ArchivedSession]) -> String {
+    hits.iter()
+        .take(20)
+        .map(|h| {
+            format!(
+                "  {:<10}  {:<24}  {:<12}  {}",
+                h.short_id(),
+                h.entry.slug.clone().unwrap_or_else(|| "—".into()),
+                h.last_active().unwrap_or("—"),
+                truncate(&h.entry.first_prompt, 48),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let clean = s.replace('\n', " ");
+    if clean.chars().count() <= max {
+        return clean;
+    }
+    format!("{}…", clean.chars().take(max - 1).collect::<String>())
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Ask on the controlling terminal. Reads /dev/tty rather than stdin so the
+/// prompt still works inside `$(chist -r …)` command substitution.
+fn confirm_restore(hit: &ArchivedSession) -> bool {
+    eprintln!(
+        "Not in ~/.claude any more. Found {} in {} (backed up {}{}).",
+        hit.label(),
+        file_name(&hit.tarball),
+        human_days((chrono::Local::now().date_naive() - hit.archive_date).num_days()),
+        match hit.last_active() {
+            Some(d) => format!(", last used {d}"),
+            None => String::new(),
+        },
+    );
+    if !hit.entry.first_prompt.is_empty() {
+        eprintln!("  “{}”", truncate(&hit.entry.first_prompt, 68));
+    }
+    eprint!("Restore it? [Y/n] ");
+    let _ = io::stderr().flush();
+
+    let Ok(tty) = File::open("/dev/tty") else {
+        eprintln!(
+            "\n(no terminal to ask on — run `chist restore {}`)",
+            hit.short_id()
+        );
+        return false;
+    };
+    let mut answer = String::new();
+    if BufReader::new(tty).read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "" | "y" | "yes"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_escape_quotes_only_when_needed() {
+        assert_eq!(shell_escape("/home/alice/tmp"), "/home/alice/tmp");
+        assert_eq!(shell_escape("a b"), "'a b'");
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn truncate_counts_characters_not_bytes() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("a\nb", 10), "a b");
+        assert_eq!(truncate("ünïcödé is fine here", 6), "ünïcö…");
     }
 }

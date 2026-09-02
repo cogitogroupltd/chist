@@ -143,6 +143,77 @@ A more elaborate version is in [`docs/shell-wrapper.zsh`](docs/shell-wrapper.zsh
 
 Claude Code already has `claude --resume` and a built-in picker, but the picker only shows sessions that started in the *current* working directory. If I worked on something three weeks ago and don't remember which project I was in, the built-in tooling can't help. `chist` reads the JSONL files directly, so it sees every session everywhere, and you can search by content rather than by directory.
 
+## Backups and restoring reaped sessions
+
+Claude Code deletes sessions from `~/.claude/projects` once they are older than
+`cleanupPeriodDays`. A conversation you named and meant to keep disappears with
+the rest, and `chist -r my-alias` starts failing on a session you can still
+remember typing.
+
+`chist` covers both halves of that: it keeps archives, and it looks in them when
+a lookup misses.
+
+### Archiving
+
+```bash
+chist backup            # archive now
+chist backup --status   # where archives live, when the last one ran
+```
+
+A run writes two files, dated `DD-MM-YYYY`:
+
+```
+kube_aws_zsh_hist_02-09-2026.tar.gz   # the archive itself
+claude_sessions_02-09-2026.json       # an index of the sessions inside it
+```
+
+The index is what makes a later lookup cheap — finding a session means reading a
+few hundred KB of JSON rather than decompressing every archive in the directory.
+
+Backups also run on their own. Any `chist` invocation does a single stat on a
+local stamp file and, at most once an hour, forks a detached low-priority
+process to decide whether one is due. Nothing about that decision happens in the
+foreground: the archive directory is usually a cloud-sync mount, and those stall
+in ways a CLI should not inherit. A lock file keeps two runs from overlapping.
+
+The default interval is a quarter of `cleanupPeriodDays`, capped at 7 days, so
+no session can be created and reaped between two consecutive backups.
+
+### Restoring
+
+When `chist -r`, `chist exec` or `chist get` cannot find a session, they look in
+the archives before giving up:
+
+```
+$ chist -r dw-contract
+Not in ~/.claude any more. Found dw-contract (b966b18e) in
+kube_aws_zsh_hist_17-07-2026.tar.gz (2 months ago, last used 2026-07-03).
+  "review the consultancy agreement redline"
+Restore it? [Y/n]
+```
+
+Say yes and the session is extracted back into `~/.claude/projects`, its mtime
+refreshed so the next cleanup pass doesn't take it straight back out, and the
+resume proceeds. The prompt is written to stderr and read from `/dev/tty`, so it
+still works inside `eval $(chist -r ...)`.
+
+`chist list -i <pattern>` that finds nothing locally reports what the archives
+hold, without restoring anything.
+
+You can also go direct:
+
+```bash
+chist restore dw-contract        # restore one session
+chist restore --list contract    # what's in the archives, restore nothing
+```
+
+When the same session appears in several archives, the freshest copy wins.
+
+A session that is **still** in `~/.claude` is never replaced by an older archived
+copy — `chist restore` refuses and tells you so. `--force` overrides it, and even
+then the live copy is renamed to `<uuid>.jsonl.replaced-<timestamp>` rather than
+overwritten.
+
 ## Configuration
 
 `chist` looks for an optional YAML config at `~/.config/chist/config.yaml`. Everything is optional:
@@ -155,7 +226,22 @@ allowed_projects:             # whitelist; if absent, all projects show up
 defaults:
   list_limit: 50              # default for `chist list` (CLI -l overrides)
   format: table               # or "json"
+backup:
+  dir: ~/backups              # default: ~/.local/share/chist/backups
+  auto: true                  # default: on if `dir` already exists
+  interval_days: 7            # default: cleanupPeriodDays / 4, capped at 7
+  archive_prefix: kube_aws_zsh_hist
+  index_prefix: claude_sessions
+  index_limit: 500            # sessions recorded in each index
+  restore: ask                # ask | auto | never
+  include:                    # what goes in the tarball
+    - ~/.claude/projects
+    - ~/.claude/history.jsonl
+    - ~/.zshrc
 ```
+
+`CHIST_BACKUP_DIR` overrides `backup.dir`; `CHIST_NO_AUTO_BACKUP=1` disables the
+background runner for one invocation.
 
 The legacy paths `~/.chist.yaml` and `~/.claudehist.yaml` are also read if the new file isn't there, so older configs keep working.
 
@@ -166,6 +252,8 @@ The cache (slug lookups) lives at `~/.cache/chist/`. It's safe to delete; it'll 
 - `chist` reads JSONL files. It doesn't talk to the Anthropic API.
 - It assumes Claude Code's on-disk format (the layout under `~/.claude/projects/`). When that format changes, `chist` will need a patch.
 - Slugs are heuristics; resume by UUID prefix if you need certainty.
+- Restoring shells out to `tar`, and archives are read whole — pulling one
+  session out of a large archive takes as long as decompressing it.
 
 ## Licence
 
