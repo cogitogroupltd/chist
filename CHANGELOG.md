@@ -33,6 +33,22 @@ All notable changes will be documented here. The format follows
 
 ### Changed
 - The config parser handles nested maps generally, rather than only `defaults:`.
+- A failed lookup now says what *is* on disk. `chist -r <name>` that matches
+  nothing lists local sessions whose slug or project path contains the query,
+  which is the answer when someone types a directory name rather than a session
+  name, and names archived sessions that merely mention the text without
+  offering to restore them.
+- The archive restore prompt only fires for a session the query actually names
+  (UUID or slug). A full-text hit is a search result, not an intent.
+- Archived sessions are no longer matched on `project_path`: every session in a
+  repository matched that repository's own name.
+- A lookup reads each backup index once rather than twice.
+
+### Fixed
+- `chist -r <query>` could offer to restore a session that was still on disk,
+  under a message saying it was not, and then fail with the contradiction
+  ("Not in ~/.claude any more" followed by "that session is still in
+  ~/.claude"). Sessions present locally are no longer offered.
 
 ## [0.3.0] — 2026-05-08
 

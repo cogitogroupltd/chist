@@ -261,12 +261,14 @@ fn cmd_exec(
             None => {
                 // Not on disk any more — Claude may have reaped it. Look in the
                 // backups before giving up.
-                if restore_from_archive(config, id).is_some()
+                let matches = search_backups(config, id);
+                if restore_from_archive(config, id, &matches).is_some()
                     && let Some(found) = locate(&reader, config, id, include_tmp)
                 {
                     found
                 } else {
                     eprintln!("Session not found: {}", id);
+                    suggest_local(config, &reader, id, Some(&matches));
                     process::exit(1);
                 }
             }
@@ -396,21 +398,24 @@ fn cmd_get(
         process::exit(1);
     };
 
+    let mut matches = None;
     if session.is_none()
         && let Some(ref id) = id_or_slug
-        && restore_from_archive(config, id).is_some()
     {
-        session = reader.get_session(id, config.allowed_projects.as_deref(), include_tmp);
+        let found = search_backups(config, id);
+        if restore_from_archive(config, id, &found).is_some() {
+            session = reader.get_session(id, config.allowed_projects.as_deref(), include_tmp);
+        }
+        matches = Some(found);
     }
 
     let Some(session) = session else {
         if last {
             eprintln!("No sessions found.");
         } else {
-            eprintln!(
-                "Session not found: {}",
-                id_or_slug.as_deref().unwrap_or("?")
-            );
+            let id = id_or_slug.as_deref().unwrap_or("?");
+            eprintln!("Session not found: {id}");
+            suggest_local(config, &reader, id, matches.as_ref());
         }
         process::exit(1);
     };
@@ -538,29 +543,91 @@ fn cmd_restore(config: &Config, query: Option<String>, list_only: bool, yes: boo
     }
 }
 
+/// Print local sessions that plausibly answer a failed lookup. Someone who
+/// types a directory name rather than a session name gets pointed at the
+/// sessions in that directory, instead of a bare "not found".
+fn suggest_local(
+    config: &Config,
+    reader: &SessionReader,
+    query: &str,
+    matches: Option<&ArchiveMatches>,
+) {
+    let needle = query.to_lowercase();
+    let sessions = reader.list_sessions(None, None, config.allowed_projects.as_deref(), true);
+
+    let local: Vec<_> = sessions
+        .iter()
+        .filter(|s| {
+            s.project_path.to_lowercase().contains(&needle)
+                || s.slug
+                    .as_deref()
+                    .is_some_and(|slug| slug.to_lowercase().contains(&needle))
+        })
+        .take(5)
+        .collect();
+
+    if !local.is_empty() {
+        eprintln!("\nDid you mean one of these, already in ~/.claude?");
+        for s in &local {
+            eprintln!(
+                "  {:<10}  {:<26}  {}  {}",
+                &s.session_id[..8.min(s.session_id.len())],
+                s.slug.clone().unwrap_or_else(|| "—".into()),
+                s.last_activity.get(..10).unwrap_or("—"),
+                s.project_path,
+            );
+        }
+        eprintln!(
+            "\n  chist -r {}",
+            &local[0].session_id[..8.min(local[0].session_id.len())]
+        );
+    }
+
+    // Archived sessions that merely mention the text: worth naming, not worth
+    // a restore prompt.
+    let mentioned: Vec<_> = matches
+        .map(|m| m.mentioned.iter().take(5).collect())
+        .unwrap_or_default();
+    if !mentioned.is_empty() {
+        eprintln!("\nArchived sessions mentioning {query:?}:");
+        for h in &mentioned {
+            eprintln!(
+                "  {:<10}  {:<26}  {}  {}",
+                h.short_id(),
+                h.entry.slug.clone().unwrap_or_else(|| "—".into()),
+                h.last_active().unwrap_or("—"),
+                truncate(&h.entry.first_prompt, 40),
+            );
+        }
+        eprintln!("\n  chist restore {}", mentioned[0].short_id());
+    }
+}
+
+/// What the backups have to say about a query.
+#[derive(Default)]
+struct ArchiveMatches {
+    /// The query is this session's slug or UUID prefix — it names the session.
+    named: Vec<ArchivedSession>,
+    /// The query merely appears in this session's text.
+    mentioned: Vec<ArchivedSession>,
+}
+
 /// Search the backups without letting an unresponsive backup directory wedge
 /// the caller. Returns `None` if the search did not answer in time — cloud-sync
 /// mounts stall, and a missing session is not worth hanging a terminal over.
-fn find_archived(
-    store: &ArchiveStore,
-    query: &str,
-    budget: Duration,
-) -> Option<Vec<ArchivedSession>> {
+fn find_archived(store: &ArchiveStore, query: &str, budget: Duration) -> Option<ArchiveMatches> {
     let (tx, rx) = mpsc::channel();
     let store = store.clone();
     let query = query.to_string();
     std::thread::spawn(move || {
         // exists() touches the mount too, so it belongs inside the budget.
-        let hits = if store.exists() {
-            let mut hits = store.find(&query, true);
-            if hits.is_empty() {
-                hits = store.find(&query, false);
-            }
-            hits
+        let matches = if store.exists() {
+            let (named, mentioned) = store.find_all(&query);
+            ArchiveMatches { named, mentioned }
         } else {
-            Vec::new()
+            ArchiveMatches::default()
         };
-        let _ = tx.send(hits);
+        let _ = tx.send(matches);
     });
 
     rx.recv_timeout(budget).ok()
@@ -569,20 +636,39 @@ fn find_archived(
 /// Look for `id` in the backups and, with the user's agreement, put it back.
 /// Returns the restored session id. All chatter goes to stderr: `exec` writes a
 /// shell command to stdout and callers eval it.
-fn restore_from_archive(config: &Config, id: &str) -> Option<String> {
+/// Ask the backups about a missing session, once, within a budget.
+fn search_backups(config: &Config, id: &str) -> ArchiveMatches {
+    if config.backup.restore == RestoreMode::Never {
+        return ArchiveMatches::default();
+    }
+    let store = ArchiveStore::new(&config.backup);
+    match find_archived(&store, id, Duration::from_secs(15)) {
+        Some(matches) => matches,
+        None => {
+            eprintln!(
+                "(backups at {} did not respond — not searched)",
+                store.dir().display()
+            );
+            ArchiveMatches::default()
+        }
+    }
+}
+
+fn restore_from_archive(config: &Config, id: &str, matches: &ArchiveMatches) -> Option<String> {
     if config.backup.restore == RestoreMode::Never {
         return None;
     }
     let store = ArchiveStore::new(&config.backup);
 
-    let Some(hits) = find_archived(&store, id, Duration::from_secs(15)) else {
-        eprintln!(
-            "(backups at {} did not respond — not searched)",
-            store.dir().display()
-        );
-        return None;
-    };
-    let hit = hits.first()?;
+    // Only a session the query actually names is worth interrupting for. A
+    // session that merely mentions the text is a search result, not an intent,
+    // and one still on disk cannot be restored at all — offering either would
+    // contradict the "not in ~/.claude any more" it is offered under.
+    let hit = matches
+        .named
+        .iter()
+        .find(|h| local_copy(&config.claude_home, &h.entry.session_id).is_none())?;
+    let _ = id;
 
     if config.backup.restore != RestoreMode::Auto && !confirm_restore(hit) {
         return None;
@@ -606,9 +692,10 @@ fn report_archive_matches(config: &Config, pattern: &str) {
         return;
     }
     let store = ArchiveStore::new(&config.backup);
-    let Some(hits) = find_archived(&store, pattern, Duration::from_secs(10)) else {
+    let Some(matches) = find_archived(&store, pattern, Duration::from_secs(10)) else {
         return;
     };
+    let hits: Vec<ArchivedSession> = matches.named.into_iter().chain(matches.mentioned).collect();
     if hits.is_empty() {
         return;
     }

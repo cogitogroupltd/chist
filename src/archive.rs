@@ -142,38 +142,71 @@ impl ArchiveStore {
             .unwrap_or_default()
     }
 
+    /// Both kinds of match in a single pass over the indexes: sessions the
+    /// query names (UUID or slug), and sessions that merely mention it.
+    /// Two `find` calls would read every index twice, which on a cloud-sync
+    /// mount is the difference between a pause and a stall.
+    pub fn find_all(&self, query: &str) -> (Vec<ArchivedSession>, Vec<ArchivedSession>) {
+        let indexes = self.load_indexes();
+        let named = self.find_inner(query, true, &indexes);
+        let named_ids: Vec<String> = named.iter().map(|h| h.entry.session_id.clone()).collect();
+        let mentioned = self
+            .find_inner(query, false, &indexes)
+            .into_iter()
+            .filter(|h| !named_ids.contains(&h.entry.session_id))
+            .collect();
+        (named, mentioned)
+    }
+
     /// Find archived sessions matching `query`, freshest copy first.
     ///
     /// `exact` matches the way `chist get`/`exec` do — full UUID, UUID prefix,
     /// or slug. Otherwise the query is a case-insensitive substring over the
     /// slug, prompt, last message and summary, mirroring `chist list -i`.
     pub fn find(&self, query: &str, exact: bool) -> Vec<ArchivedSession> {
+        self.find_inner(query, exact, &self.load_indexes())
+    }
+
+    /// Every index read once, paired with the tarball it describes. The backup
+    /// directory is typically a cloud-sync mount, where a read_dir per index
+    /// turns a lookup into a stall.
+    fn load_indexes(&self) -> Vec<(NaiveDate, PathBuf, Vec<IndexEntry>)> {
+        let tarballs = self.tarballs();
+        self.indexes()
+            .into_iter()
+            .filter_map(|(date, index)| {
+                // An index with no tarball beside it cannot be restored from.
+                let tarball = tarballs.iter().find(|(d, _)| *d == date)?.1.clone();
+                Some((date, tarball, Self::read_index(&index)))
+            })
+            .collect()
+    }
+
+    fn find_inner(
+        &self,
+        query: &str,
+        exact: bool,
+        indexes: &[(NaiveDate, PathBuf, Vec<IndexEntry>)],
+    ) -> Vec<ArchivedSession> {
         let needle = query.to_lowercase();
         let mut hits: Vec<ArchivedSession> = Vec::new();
 
-        // Listed once: the backup directory is typically a cloud-sync mount,
-        // where a read_dir per index turns a lookup into a stall.
-        let tarballs = self.tarballs();
-
-        for (date, index) in self.indexes() {
-            let tarball = tarballs.iter().find(|(d, _)| *d == date).map(|(_, p)| p);
-            let Some(tarball) = tarball else {
-                // An index with no tarball beside it cannot be restored from.
-                continue;
-            };
-
-            for entry in Self::read_index(&index) {
+        for (date, tarball, entries) in indexes {
+            let date = *date;
+            for entry in entries.iter().cloned() {
                 let matched = if exact {
                     entry.session_id == query
                         || (query.len() >= 4 && entry.session_id.starts_with(query))
                         || entry.slug.as_deref() == Some(query)
                 } else {
+                    // Deliberately not project_path: every session in a repo
+                    // would match the repo's own name, and a directory is not
+                    // what someone means when they name a session.
                     let haystack = [
                         entry.slug.clone().unwrap_or_default(),
                         entry.first_prompt.clone(),
                         entry.last_message.clone().unwrap_or_default(),
                         entry.summary.clone().unwrap_or_default(),
-                        entry.project_path.clone(),
                     ]
                     .join("\n")
                     .to_lowercase();
@@ -533,6 +566,29 @@ mod tests {
             hits[0].archive_date,
             NaiveDate::from_ymd_opt(2026, 6, 22).unwrap()
         );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_directory_name_does_not_match_every_session_in_it() {
+        let dir = scratch("projectmatch");
+        seed(
+            &dir,
+            "22-06-2026",
+            "b966b18e-66f0-49cc-b4f3-b00abd220457",
+            "dw-contract",
+        );
+        let store = store_at(&dir);
+
+        // The seeded session lives in /home/alice/tmp. Typing the directory
+        // name must not offer it as though it were a session called that.
+        assert!(
+            store.find("tmp", false).is_empty(),
+            "project path must not be part of the search haystack"
+        );
+        // Content still matches.
+        assert_eq!(store.find("consultancy", false).len(), 1);
 
         fs::remove_dir_all(&dir).unwrap();
     }
