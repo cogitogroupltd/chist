@@ -39,6 +39,7 @@ use std::time::Duration;
   chist get 3f4b4b02                      # Get by UUID prefix
   chist exec frolicking-stirring-unicorn   # Resume session in its project dir
   eval $(chist exec 3f4b4b02)              # Same, by UUID prefix
+  chist ls -i 'search string' | chist -r -  # Resume the first match
   chist -r my-alias -e 'git status'        # Run one prompt non-interactively
   chist backup                             # Back up now
   chist backup --status                    # When the last backup ran
@@ -247,6 +248,20 @@ fn cmd_exec(
 ) {
     let reader = SessionReader::new(&config.claude_home);
 
+    // `-` means "read the id from stdin", so `chist ls -i foo | chist -r -` works.
+    let id_or_slug = if id_or_slug.as_deref() == Some("-") {
+        let input = io::read_to_string(io::stdin()).unwrap_or_default();
+        match first_session_id(&input) {
+            Some(id) => Some(id),
+            None => {
+                eprintln!("No session in input");
+                process::exit(1);
+            }
+        }
+    } else {
+        id_or_slug
+    };
+
     // Find the session — try get_session (detail) first, fall back to scanning summaries
     let (session_id, project_path) = if last {
         if let Some(s) = reader.get_last_session(config.allowed_projects.as_deref(), include_tmp) {
@@ -320,6 +335,18 @@ fn locate(
         .iter()
         .find(|s| s.session_id.starts_with(id) || s.slug.as_deref() == Some(id))
         .map(|s| (s.session_id.clone(), s.project_path.clone()))
+}
+
+/// Pull the first session ID out of piped `chist ls` output.
+/// The ID is the first column, so take the first line whose leading token is
+/// UUID-shaped — that skips the header, "No sessions found.", and the wrapped
+/// continuation rows of the Last Msg column.
+fn first_session_id(input: &str) -> Option<String> {
+    input
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .find(|token| token.len() >= 8 && token.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+        .map(str::to_string)
 }
 
 fn shell_escape(s: &str) -> String {
@@ -795,5 +822,35 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("a\nb", 10), "a b");
         assert_eq!(truncate("ünïcödé is fine here", 6), "ünïcö…");
+    }
+}
+
+#[cfg(test)]
+mod stdin_tests {
+    use super::first_session_id;
+
+    const TABLE: &str = " ID        Alias      Project                                        Branch  Status   Msgs  Last Msg\n\
+ 27810e3c             ...fior/fiordc.aigateway.fior.group            main    Running  4683  <task-notification>\n\
+                                                                                            <task-id>bfkt7i83...\n\
+ aef33748  hardening  ...fior/fiordc.aigateway.fior.group            main             4706  <command-name>/rename\n";
+
+    #[test]
+    fn takes_the_first_row_of_a_table() {
+        assert_eq!(first_session_id(TABLE).as_deref(), Some("27810e3c"));
+    }
+
+    #[test]
+    fn accepts_a_bare_id() {
+        assert_eq!(
+            first_session_id("aef33748-2512-44e6-b7e6-7adfd7720f34\n").as_deref(),
+            Some("aef33748-2512-44e6-b7e6-7adfd7720f34")
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_no_results() {
+        assert_eq!(first_session_id(""), None);
+        assert_eq!(first_session_id("No sessions found.\n"), None);
+        assert_eq!(first_session_id(" ID  Alias  Project\n"), None);
     }
 }

@@ -30,6 +30,10 @@ All notable changes will be documented here. The format follows
   `<uuid>.jsonl.replaced-<timestamp>`.
 - `backup:` section in the config, plus `CHIST_BACKUP_DIR` and
   `CHIST_NO_AUTO_BACKUP`.
+- `chist -r -` (and `exec -`) reads the session ID from stdin, so
+  `chist ls -i 'something' | chist -r -` resumes the first match. The ID is
+  taken from the first column of the first result row, which also accepts a
+  bare UUID piped in. An input with no session exits 1.
 
 ### Changed
 - The config parser handles nested maps generally, rather than only `defaults:`.
@@ -45,6 +49,14 @@ All notable changes will be documented here. The format follows
 - A lookup reads each backup index once rather than twice.
 
 ### Fixed
+- Project directories whose path components contain a `.`, `_`, space or
+  parenthesis decoded to the wrong path — Claude replaces every
+  non-alphanumeric character with a dash, not just `/`, so
+  `.../fiordc.aigateway.fior.group` came back as `.../fiordc/aigateway/fior/group`
+  and `chist -r` cd'd nowhere. Components are now recovered by matching real
+  directory entries against their own encoded form.
+- `chist list` truncated the branch and last-message columns by byte index,
+  which panicked on multibyte text.
 - `chist -r <query>` could offer to restore a session that was still on disk,
   under a message saying it was not, and then fail with the contradiction
   ("Not in ~/.claude any more" followed by "that session is still in
