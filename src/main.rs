@@ -15,7 +15,7 @@ use formatters::{
 };
 use session_reader::SessionReader;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process;
 use std::sync::mpsc;
@@ -40,6 +40,7 @@ use std::time::Duration;
   chist exec frolicking-stirring-unicorn   # Resume session in its project dir
   eval $(chist exec 3f4b4b02)              # Same, by UUID prefix
   chist ls -i 'search string' | chist -r    # Resume the first match
+  chist ls -i 'search string' | chist exec  # Same, spelled as the subcommand
   chist -r my-alias -e 'git status'        # Run one prompt non-interactively
   chist backup                             # Back up now
   chist backup --status                    # When the last backup ran
@@ -254,8 +255,11 @@ fn cmd_exec(
 ) {
     let reader = SessionReader::new(&config.claude_home);
 
-    // `-` means "read the id from stdin", so `chist ls -i foo | chist -r -` works.
-    let id_or_slug = if id_or_slug.as_deref() == Some("-") {
+    // `-` means "read the id from stdin", and so does a bare `-r` or `exec`
+    // at the end of a pipe: `chist ls -i foo | chist -r`.
+    let from_stdin = id_or_slug.as_deref() == Some("-")
+        || (id_or_slug.is_none() && !last && !io::stdin().is_terminal());
+    let id_or_slug = if from_stdin {
         let input = io::read_to_string(io::stdin()).unwrap_or_default();
         match first_session_id(&input) {
             Some(id) => Some(id),

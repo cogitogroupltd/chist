@@ -31,8 +31,9 @@ All notable changes will be documented here. The format follows
 - `backup:` section in the config, plus `CHIST_BACKUP_DIR` and
   `CHIST_NO_AUTO_BACKUP`.
 - `chist -r` reads the session ID from stdin, so
-  `chist ls -i 'something' | chist -r` resumes the first match. `-r -` and
-  `exec -` are the explicit spellings. The ID is taken from the first column of
+  `chist ls -i 'something' | chist -r` resumes the first match. A bare `exec`
+  at the end of a pipe does the same; `-r -` and `exec -` are the explicit
+  spellings, and are the ones to use when stdin is a terminal. The ID is taken from the first column of
   the first result row, which also accepts a bare UUID piped in. An input with
   no session exits 1.
 
