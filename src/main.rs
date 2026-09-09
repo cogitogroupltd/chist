@@ -29,6 +29,8 @@ use std::time::Duration;
     after_help = r#"Examples:
   chist list                              # List recent sessions
   chist list -l 10                        # List 10 most recent sessions
+  chist list fior                         # Filter by id, alias or path
+  chist list '^/home/.*qa-agent$'         # ...the filter is a regex
   chist list --project cog                # Filter by project name
   chist list -f json                      # Output as JSON
   chist list -a                           # Include /tmp sessions
@@ -74,6 +76,10 @@ enum Commands {
     /// List Claude Code sessions
     #[command(alias = "ls")]
     List {
+        /// Filter by session id, alias or project path. Treated as a
+        /// case-insensitive regex, or as plain text if that will not compile.
+        pattern: Option<String>,
+
         /// Maximum number of sessions to show
         #[arg(short, long)]
         limit: Option<usize>,
@@ -204,13 +210,14 @@ fn main() {
 
     match command {
         Commands::List {
+            pattern,
             limit,
             project,
             search,
             regex,
             format,
             all,
-        } => cmd_list(&config, limit, project, search, regex, format, all),
+        } => cmd_list(&config, pattern, limit, project, search, regex, format, all),
         Commands::Exec {
             id_or_slug,
             last,
@@ -370,8 +377,27 @@ fn shell_escape(s: &str) -> String {
     }
 }
 
+/// Build the matcher for `chist ls <pattern>`. The pattern is a case-insensitive
+/// regex; one that will not compile — `*fior`, say — falls back to a substring
+/// match on the pattern with its glob stars trimmed off.
+fn build_matcher(pattern: &str) -> Box<dyn Fn(&str) -> bool> {
+    match regex::Regex::new(&format!("(?i){pattern}")) {
+        Ok(re) => Box::new(move |field| re.is_match(field)),
+        Err(_) => {
+            let needle = pattern.trim_matches('*').to_lowercase();
+            Box::new(move |field| field.to_lowercase().contains(&needle))
+        }
+    }
+}
+
+/// A session matches when the pattern hits its id, its alias, or its path.
+fn session_matches(m: &dyn Fn(&str) -> bool, id: &str, alias: Option<&str>, path: &str) -> bool {
+    m(id) || alias.is_some_and(|a| m(a)) || m(path)
+}
+
 fn cmd_list(
     config: &Config,
+    pattern: Option<String>,
     limit: Option<usize>,
     project: Option<String>,
     search: Option<String>,
@@ -383,23 +409,35 @@ fn cmd_list(
     let limit = limit.unwrap_or(config.default_list_limit);
     let output_format = format.as_deref().unwrap_or(&config.default_format);
 
-    let sessions = if let Some(ref pattern) = search {
+    // The limit counts what matched, so with a pattern the reader hands back
+    // everything and the cut happens after filtering.
+    let fetch_limit = if pattern.is_some() { None } else { Some(limit) };
+
+    let mut sessions = if let Some(ref search_pattern) = search {
         reader.search_sessions(
-            pattern,
+            search_pattern,
             use_regex,
             true,
-            Some(limit),
+            fetch_limit,
             config.allowed_projects.as_deref(),
             include_tmp,
         )
     } else {
         reader.list_sessions(
-            Some(limit),
+            fetch_limit,
             project.as_deref(),
             config.allowed_projects.as_deref(),
             include_tmp,
         )
     };
+
+    if let Some(ref pat) = pattern {
+        let matcher = build_matcher(pat);
+        sessions.retain(|s| {
+            session_matches(&*matcher, &s.session_id, s.slug.as_deref(), &s.project_path)
+        });
+        sessions.truncate(limit);
+    }
 
     if sessions.is_empty() {
         println!("No sessions found.");
@@ -910,5 +948,83 @@ mod cli_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::{build_matcher, session_matches};
+
+    fn hits(pattern: &str, id: &str, alias: Option<&str>, path: &str) -> bool {
+        session_matches(&build_matcher(pattern), id, alias, path)
+    }
+
+    #[test]
+    fn plain_text_matches_anywhere_in_any_field() {
+        assert!(hits("fior", "aaaa", None, "/home/cogito/dev/fior/fior-web"));
+        assert!(hits(
+            "harden",
+            "aaaa",
+            Some("hardening"),
+            "/home/cogito/dev/x"
+        ));
+        assert!(hits(
+            "36cabbbb",
+            "36cabbbb-ee2b",
+            None,
+            "/home/cogito/dev/x"
+        ));
+        assert!(!hits(
+            "fior",
+            "aaaa",
+            Some("hardening"),
+            "/home/cogito/dev/x"
+        ));
+    }
+
+    #[test]
+    fn matching_is_case_insensitive() {
+        assert!(hits("FIOR", "aaaa", None, "/home/cogito/dev/fior"));
+        assert!(hits("fior", "aaaa", Some("FIOR-GW"), "/home/x"));
+    }
+
+    #[test]
+    fn a_leading_star_falls_back_to_substring() {
+        assert!(hits(
+            "*fior",
+            "aaaa",
+            None,
+            "/home/cogito/dev/fior/fior-web"
+        ));
+        assert!(!hits("*fior", "aaaa", None, "/home/cogito/dev/qa-agent"));
+    }
+
+    #[test]
+    fn a_real_regex_keeps_regex_meaning() {
+        assert!(hits(
+            "^/home/.*qa-agent$",
+            "a",
+            None,
+            "/home/cogito/dev/qa-agent"
+        ));
+        assert!(!hits(
+            "^/home/.*qa-agent$",
+            "a",
+            None,
+            "/home/cogito/dev/qa-agent/sub"
+        ));
+        assert!(hits(
+            "fior|starfish",
+            "a",
+            None,
+            "/home/cogito/dev/starfish"
+        ));
+        assert!(hits("fio*r", "a", None, "/home/x/fir"));
+    }
+
+    #[test]
+    fn an_uncompilable_pattern_is_taken_literally() {
+        assert!(hits("fior(", "a", None, "/home/x/fior(1)"));
+        assert!(!hits("fior(", "a", None, "/home/x/fior"));
     }
 }

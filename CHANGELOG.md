@@ -30,6 +30,11 @@ All notable changes will be documented here. The format follows
   `<uuid>.jsonl.replaced-<timestamp>`.
 - `backup:` section in the config, plus `CHIST_BACKUP_DIR` and
   `CHIST_NO_AUTO_BACKUP`.
+- `chist ls <pattern>` filters by session id, alias or project path, so
+  `chist ls fior` finds every session under a fior path or with a fior alias.
+  The pattern is a case-insensitive regex; one that will not compile — `*fior`
+  — falls back to a substring match, so the glob spelling works too. It ANDs
+  with `--project` and with `-i`, and `--limit` counts what matched.
 - `chist -r` reads the session ID from stdin, so
   `chist ls -i 'something' | chist -r` resumes the first match. A bare `exec`
   at the end of a pipe does the same; `-r -` and `exec -` are the explicit
