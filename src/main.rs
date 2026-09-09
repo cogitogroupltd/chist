@@ -39,7 +39,7 @@ use std::time::Duration;
   chist get 3f4b4b02                      # Get by UUID prefix
   chist exec frolicking-stirring-unicorn   # Resume session in its project dir
   eval $(chist exec 3f4b4b02)              # Same, by UUID prefix
-  chist ls -i 'search string' | chist -r -  # Resume the first match
+  chist ls -i 'search string' | chist -r    # Resume the first match
   chist -r my-alias -e 'git status'        # Run one prompt non-interactively
   chist backup                             # Back up now
   chist backup --status                    # When the last backup ran
@@ -50,8 +50,14 @@ struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
 
-    /// Resume a session (shorthand for `exec <id>`)
-    #[arg(short = 'r', long = "resume")]
+    /// Resume a session (shorthand for `exec <id>`). Bare `-r`, or `-r -`,
+    /// takes the session from stdin: `chist ls -i foo | chist -r`.
+    #[arg(
+        short = 'r',
+        long = "resume",
+        num_args = 0..=1,
+        default_missing_value = "-"
+    )]
     resume: Option<String>,
 
     /// Execute a single prompt non-interactively (use with -r)
@@ -852,5 +858,53 @@ mod stdin_tests {
         assert_eq!(first_session_id(""), None);
         assert_eq!(first_session_id("No sessions found.\n"), None);
         assert_eq!(first_session_id(" ID  Alias  Project\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).unwrap()
+    }
+
+    #[test]
+    fn bare_resume_flag_reads_stdin() {
+        assert_eq!(parse(&["chist", "-r"]).resume.as_deref(), Some("-"));
+        assert_eq!(parse(&["chist", "--resume"]).resume.as_deref(), Some("-"));
+    }
+
+    #[test]
+    fn explicit_dash_still_reads_stdin() {
+        assert_eq!(parse(&["chist", "-r", "-"]).resume.as_deref(), Some("-"));
+    }
+
+    #[test]
+    fn resume_with_a_value_is_unchanged() {
+        assert_eq!(
+            parse(&["chist", "-r", "3f4b4b02"]).resume.as_deref(),
+            Some("3f4b4b02")
+        );
+    }
+
+    #[test]
+    fn bare_resume_composes_with_execute() {
+        let cli = parse(&["chist", "-r", "-e", "git status"]);
+        assert_eq!(cli.resume.as_deref(), Some("-"));
+        assert_eq!(cli.execute.as_deref(), Some("git status"));
+    }
+
+    #[test]
+    fn bare_exec_subcommand_takes_no_id() {
+        let cli = parse(&["chist", "exec"]);
+        assert!(matches!(
+            cli.command,
+            Some(super::Commands::Exec {
+                id_or_slug: None,
+                ..
+            })
+        ));
     }
 }

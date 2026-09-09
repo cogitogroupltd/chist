@@ -30,10 +30,11 @@ All notable changes will be documented here. The format follows
   `<uuid>.jsonl.replaced-<timestamp>`.
 - `backup:` section in the config, plus `CHIST_BACKUP_DIR` and
   `CHIST_NO_AUTO_BACKUP`.
-- `chist -r -` (and `exec -`) reads the session ID from stdin, so
-  `chist ls -i 'something' | chist -r -` resumes the first match. The ID is
-  taken from the first column of the first result row, which also accepts a
-  bare UUID piped in. An input with no session exits 1.
+- `chist -r` reads the session ID from stdin, so
+  `chist ls -i 'something' | chist -r` resumes the first match. `-r -` and
+  `exec -` are the explicit spellings. The ID is taken from the first column of
+  the first result row, which also accepts a bare UUID piped in. An input with
+  no session exits 1.
 
 ### Changed
 - The config parser handles nested maps generally, rather than only `defaults:`.
