@@ -56,6 +56,10 @@ All notable changes will be documented here. The format follows
 - A lookup reads each backup index once rather than twice.
 
 ### Fixed
+- A failed lookup suggested `chist restore <id>` for archived sessions that are
+  still in `~/.claude`. Restore correctly declines to touch a live session, so
+  the suggested command did nothing — and the row now says
+  `(still in ~/.claude)` and suggests `chist -r <id>`, which is what was wanted.
 - Project directories whose path components contain a `.`, `_`, space or
   parenthesis decoded to the wrong path — Claude replaces every
   non-alphanumeric character with a dash, not just `/`, so

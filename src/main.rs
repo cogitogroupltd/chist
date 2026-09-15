@@ -618,6 +618,19 @@ fn cmd_restore(config: &Config, query: Option<String>, list_only: bool, yes: boo
     }
 }
 
+/// The command that actually helps for an archived hit. A session still in
+/// ~/.claude wants resuming; only a reaped one wants restoring. Suggesting
+/// `restore` for a live session sends you to a command that declines to do
+/// anything — and, if a shell wrapper has claimed the word `restore`, somewhere
+/// else entirely.
+fn hint_for(still_local: bool, short_id: &str) -> String {
+    if still_local {
+        format!("chist -r {short_id}")
+    } else {
+        format!("chist restore {short_id}")
+    }
+}
+
 /// Print local sessions that plausibly answer a failed lookup. Someone who
 /// types a directory name rather than a session name gets pointed at the
 /// sessions in that directory, instead of a bare "not found".
@@ -666,15 +679,21 @@ fn suggest_local(
     if !mentioned.is_empty() {
         eprintln!("\nArchived sessions mentioning {query:?}:");
         for h in &mentioned {
+            // A backup index lists what was archived, not what has since been
+            // reaped — most of these are still on disk and only need resuming.
+            let here = local_copy(&config.claude_home, &h.entry.session_id).is_some();
             eprintln!(
-                "  {:<10}  {:<26}  {}  {}",
+                "  {:<10}  {:<26}  {}  {}{}",
                 h.short_id(),
                 h.entry.slug.clone().unwrap_or_else(|| "—".into()),
                 h.last_active().unwrap_or("—"),
                 truncate(&h.entry.first_prompt, 40),
+                if here { "   (still in ~/.claude)" } else { "" },
             );
         }
-        eprintln!("\n  chist restore {}", mentioned[0].short_id());
+        let first = &mentioned[0];
+        let still_local = local_copy(&config.claude_home, &first.entry.session_id).is_some();
+        eprintln!("\n  {}", hint_for(still_local, &first.short_id()));
     }
 }
 
@@ -1026,5 +1045,20 @@ mod filter_tests {
     fn an_uncompilable_pattern_is_taken_literally() {
         assert!(hits("fior(", "a", None, "/home/x/fior(1)"));
         assert!(!hits("fior(", "a", None, "/home/x/fior"));
+    }
+}
+
+#[cfg(test)]
+mod hint_tests {
+    use super::hint_for;
+
+    #[test]
+    fn a_session_still_on_disk_is_resumed_not_restored() {
+        assert_eq!(hint_for(true, "b959d3a5"), "chist -r b959d3a5");
+    }
+
+    #[test]
+    fn a_reaped_session_is_restored() {
+        assert_eq!(hint_for(false, "b959d3a5"), "chist restore b959d3a5");
     }
 }
