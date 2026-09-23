@@ -7,6 +7,12 @@ All notable changes will be documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `-H` / `--host <name>` reaches sessions on another machine's claude-runner
+  through its client, `clrn`. `chist -r <alias> -H <host>` prints the clrn
+  command that opens the session, for the shell wrapper to eval, just as a local
+  resume prints `cd … && claude --resume`. `chist ls -H <host> [project]` lists
+  what that runner holds. Hosts come from a new `hosts:` map in the config, or
+  are taken as a tailnet machine name or a URL.
 - `chist backup` — archives the Claude home to a backup directory as
   `<prefix>_DD-MM-YYYY.tar.gz`, alongside a `claude_sessions_DD-MM-YYYY.json`
   index of the sessions it contains. `--status` reports where archives live and

@@ -1,4 +1,5 @@
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// What to do when a session is missing locally but present in a backup archive.
@@ -188,6 +189,8 @@ pub struct Config {
     pub default_list_limit: usize,
     pub default_format: String,
     pub backup: BackupConfig,
+    /// `--host` names → runner URLs, from the `hosts:` map.
+    pub hosts: HashMap<String, String>,
 }
 
 impl Config {
@@ -252,6 +255,15 @@ impl Config {
             default_list_limit,
             default_format,
             backup: BackupConfig::load(&data),
+            hosts: data
+                .get("hosts")
+                .and_then(|v| v.as_object())
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 

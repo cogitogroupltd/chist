@@ -166,6 +166,20 @@ chist() {
 
 A more elaborate version is in [`docs/shell-wrapper.zsh`](docs/shell-wrapper.zsh) — it adds `save`/`restore` for konsole tabs.
 
+### Sessions on another machine
+
+`-H` / `--host` works with sessions held by a [claude-runner](https://github.com/cogitogroupltd/systemology/tree/main/cog-claude-anywhere-rust) on another machine, through its terminal client `clrn`. You don't have to SSH in.
+
+```
+$ chist -r aws-migration -H george     # open it in clrn on george's runner
+$ chist ls -H george                   # that runner's projects
+$ chist ls -H george qa-agent          # one project's sessions
+```
+
+`-r` matches the session's `/rename` title (the same name chist shows as its alias), then an id prefix, then part of a title, across every project on the runner. Like a local resume, it prints a command that the shell wrapper evals, so you land straight in the conversation. `--fork`, `-e` and reading the session from stdin are local-only for now. Inside clrn, `/fork` continues the session in a copy.
+
+The host is a name from the config's `hosts:` map (see below), a machine name on your tailnet, or a URL. A bare name gets the runner's port, 8282. `clrn` must be on your `PATH`.
+
 ## Why this exists
 
 Claude Code already has `claude --resume` and a built-in picker, but the picker only shows sessions that started in the *current* working directory. If I worked on something three weeks ago and don't remember which project I was in, the built-in tooling can't help. `chist` reads the JSONL files directly, so it sees every session everywhere, and you can search by content rather than by directory.
@@ -253,6 +267,8 @@ allowed_projects:             # whitelist; if absent, all projects show up
 defaults:
   list_limit: 50              # default for `chist list` (CLI -l overrides)
   format: table               # or "json"
+hosts:                        # names for `-H`; a bare name means http://<name>:8282
+  george: http://100.112.92.94:8282
 backup:
   dir: ~/backups              # default: ~/.local/share/chist/backups
   auto: true                  # default: on if `dir` already exists

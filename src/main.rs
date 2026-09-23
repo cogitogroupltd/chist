@@ -4,6 +4,7 @@ mod config;
 mod formatters;
 mod models;
 mod path_utils;
+mod remote;
 mod session_reader;
 
 use archive::{ArchiveStore, ArchivedSession, local_copy};
@@ -75,6 +76,11 @@ struct Cli {
     /// Execute a single prompt non-interactively (use with -r)
     #[arg(short = 'e', long = "execute", requires = "resume")]
     execute: Option<String>,
+
+    /// Work with sessions on another machine's claude-runner, through clrn.
+    /// A name from the config's `hosts:` map, a tailnet machine name, or a URL.
+    #[arg(short = 'H', long = "host", global = true)]
+    host: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -210,6 +216,11 @@ enum Commands {
 fn main() {
     let cli = Cli::parse_from(split_resume_fork(std::env::args()));
 
+    if let Some(host) = cli.host.as_deref() {
+        cmd_remote(&cli, host);
+        return;
+    }
+
     // -r <id> is a shorthand for `exec <id>`, and -rf for `exec <id> --fork`.
     if let Some(ref id) = cli.resume {
         let config = Config::load(cli.config.as_deref());
@@ -283,6 +294,44 @@ fn main() {
             yes,
             force,
         } => cmd_restore(&config, query, list, yes, force),
+    }
+}
+
+/// `--host`: hand off to clrn. `-r` prints the command for the shell wrapper
+/// to eval; `ls` runs clrn directly, since its output is only read.
+fn cmd_remote(cli: &Cli, host: &str) {
+    let config = Config::load(cli.config.as_deref());
+    let url = remote::url_for(&config.hosts, host);
+    remote::require_clrn();
+    let unsupported = |what: &str| -> ! {
+        eprintln!("chist: {what} does not work with --host yet (inside clrn, /fork continues in a copy)");
+        process::exit(2);
+    };
+    if let Some(query) = cli.resume.as_deref() {
+        if cli.fork {
+            unsupported("--fork");
+        }
+        if cli.execute.is_some() {
+            unsupported("--execute");
+        }
+        if query == "-" {
+            unsupported("reading the session from stdin");
+        }
+        println!("{}", remote::resume_command(&url, query));
+        return;
+    }
+    match &cli.command {
+        Some(Commands::List { pattern, .. }) => {
+            let mut cmd = process::Command::new("clrn");
+            cmd.args(["--url", &url, "ls"]);
+            cmd.args(pattern);
+            let status = cmd.status().unwrap_or_else(|e| {
+                eprintln!("chist: could not run clrn: {e}");
+                process::exit(1);
+            });
+            process::exit(status.code().unwrap_or(1));
+        }
+        _ => unsupported("that command"),
     }
 }
 
