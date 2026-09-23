@@ -92,7 +92,7 @@ chist() {
             shift; _chist_save "$@" ;;
         restore|open)
             shift; _chist_restore "$@" ;;
-        exec|e|-r|--resume|-e|--execute)
+        exec|e|-r|-rf|-fr|--resume|--fork|-e|--execute)
             local cmd
             cmd=$(command chist "$@")
             if [[ $? -eq 0 && -n "$cmd" ]]; then

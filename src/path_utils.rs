@@ -104,6 +104,23 @@ pub fn is_tmp_session(project_path: &str) -> bool {
     project_path.starts_with("/tmp/") || project_path == "/tmp"
 }
 
+/// Render a path with the home directory written as `~`, the way a shell
+/// prompt does.
+pub fn shorten_home(path: &str) -> String {
+    let Some(home) = dirs::home_dir() else {
+        return path.to_string();
+    };
+    let home = home.to_string_lossy();
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home.as_ref()) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

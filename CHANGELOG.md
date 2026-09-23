@@ -41,8 +41,26 @@ All notable changes will be documented here. The format follows
   spellings, and are the ones to use when stdin is a terminal. The ID is taken from the first column of
   the first result row, which also accepts a bare UUID piped in. An input with
   no session exits 1.
+- `chist -rf <session>` resumes a session by forking it, leaving the original
+  where it was. `-fr` works too, as does `chist exec <session> --fork` and a
+  bare `-rf` at the end of a pipe. The fork is named after its parent —
+  `<alias>-fork`, numbered `-fork-2` onward if that is taken — so the two do not
+  sit in the listing under one name.
+- `chist ls -i <pattern>` prints the lines that matched, grep style: a heading
+  per session, then each hit with its role, timestamp and the matching line,
+  windowed around the match and highlighted on a terminal. `-m/--max-matches`
+  sets how many lines to show per session (5 by default, `0` for all), and
+  `--tools` widens the search to tool calls, tool output and thinking. `-f json`
+  carries the matches and their byte offsets. The session id still leads each
+  heading, so `chist ls -i foo | chist -r` is unaffected.
 
 ### Changed
+- `-i` now searches assistant replies as well as your own prompts, and no longer
+  searches tool results by default — a hit inside a pasted file or a command's
+  output is noise once the matching line is on screen. `--tools` restores the
+  old reach.
+- A search defaults to the new grep output rather than the session table;
+  `-f table` asks for the table back.
 - The config parser handles nested maps generally, rather than only `defaults:`.
 - A failed lookup now says what *is* on disk. `chist -r <name>` that matches
   nothing lists local sessions whose slug or project path contains the query,
@@ -56,6 +74,13 @@ All notable changes will be documented here. The format follows
 - A lookup reads each backup index once rather than twice.
 
 ### Fixed
+- `--fork` never forked. It emitted `claude -rf <id>`, but `claude` has no `-f`,
+  so the cluster was read as `-r f`: it resumed whatever session matched the
+  text "f" and passed the real id in as a prompt. It now emits
+  `claude --fork-session`.
+- `chist -rf <session>` resumed a session matching "f" rather than forking, for
+  the same reason on chist's own side: `-r` takes an optional value, so clap
+  read `-rf` as `-r=f`. The cluster is now split before parsing.
 - A failed lookup suggested `chist restore <id>` for archived sessions that are
   still in `~/.claude`. Restore correctly declines to touch a live session, so
   the suggested command did nothing — and the row now says

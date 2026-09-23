@@ -1,4 +1,4 @@
-use crate::models::{SessionDetail, SessionStatus, SessionSummary};
+use crate::models::{SearchHit, SessionDetail, SessionStatus, SessionSummary};
 use crate::path_utils::*;
 use serde_json::Value;
 use std::cell::RefCell;
@@ -282,6 +282,21 @@ impl SessionReader {
         }
 
         None
+    }
+
+    /// The alias a session shows under: its `/rename` title if it has one,
+    /// otherwise the slug Claude generated for it.
+    pub fn alias_for(&self, session_id: &str, project_path: &str) -> Option<String> {
+        self.get_slug_for_session(session_id, project_path)
+    }
+
+    /// A name for a fork of `base` that nothing already answers to. Only the
+    /// slug cache is consulted — checking properly would mean reading every
+    /// session on disk to emit one shell command — so a name that has never
+    /// been listed can still collide. Claude's `/rename` settles it if so.
+    pub fn free_fork_alias(&self, base: &str) -> String {
+        let cache = self.slug_cache.borrow();
+        next_fork_alias(base, &|name| cache.values().any(|slug| slug == name))
     }
 
     fn find_session_by_slug(&self, slug: &str) -> Option<String> {
@@ -714,6 +729,8 @@ impl SessionReader {
                     git_branch,
                     status,
                     last_activity,
+                    matches: Vec::new(),
+                    matches_omitted: 0,
                 });
                 seen.insert(session_id);
             }
@@ -850,6 +867,8 @@ impl SessionReader {
                         } else {
                             last_activity
                         },
+                        matches: Vec::new(),
+                        matches_omitted: 0,
                     });
                     seen.insert(session_id);
                 }
@@ -901,6 +920,8 @@ impl SessionReader {
                 git_branch,
                 status,
                 last_activity: start_time,
+                matches: Vec::new(),
+                matches_omitted: 0,
             });
             seen.insert(rs.session_id.clone());
         }
@@ -1073,6 +1094,9 @@ impl SessionReader {
         self.get_session(&first.session_id, allowed_projects, include_tmp)
     }
 
+    /// Find sessions whose conversation matches `pattern`, keeping up to
+    /// `max_hits` matching lines per session (`None` keeps every match).
+    #[allow(clippy::too_many_arguments)]
     pub fn search_sessions(
         &self,
         pattern: &str,
@@ -1081,6 +1105,8 @@ impl SessionReader {
         limit: Option<usize>,
         allowed_projects: Option<&[String]>,
         include_tmp: bool,
+        max_hits: Option<usize>,
+        search_tools: bool,
     ) -> Vec<SessionSummary> {
         let regex_pattern = if use_regex {
             pattern.to_string()
@@ -1105,10 +1131,24 @@ impl SessionReader {
             else {
                 return Vec::new();
             };
-            return self.search_with_regex(&re, limit, allowed_projects, include_tmp);
+            return self.search_with_regex(
+                &re,
+                limit,
+                allowed_projects,
+                include_tmp,
+                max_hits,
+                search_tools,
+            );
         };
 
-        self.search_with_regex(&re, limit, allowed_projects, include_tmp)
+        self.search_with_regex(
+            &re,
+            limit,
+            allowed_projects,
+            include_tmp,
+            max_hits,
+            search_tools,
+        )
     }
 
     fn search_with_regex(
@@ -1117,6 +1157,8 @@ impl SessionReader {
         limit: Option<usize>,
         allowed_projects: Option<&[String]>,
         include_tmp: bool,
+        max_hits: Option<usize>,
+        search_tools: bool,
     ) -> Vec<SessionSummary> {
         let running_sessions = self.get_running_sessions();
         let running_map = Self::running_session_map(&running_sessions);
@@ -1171,31 +1213,8 @@ impl SessionReader {
                     continue;
                 }
 
-                // Search user messages
-                let Ok(file) = fs::File::open(&jsonl_path) else {
-                    continue;
-                };
-                let buf = BufReader::new(file);
-                let mut found = false;
-
-                for line in buf.lines().map_while(Result::ok) {
-                    if let Ok(data) = serde_json::from_str::<Value>(&line)
-                        && data.get("type").and_then(|v| v.as_str()) == Some("user")
-                        && let Some(content) = data.get("message").and_then(|m| m.get("content"))
-                    {
-                        let text = if let Some(s) = content.as_str() {
-                            s.to_string()
-                        } else {
-                            content.to_string()
-                        };
-                        if re.is_match(&text) {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-
-                if !found {
+                let (hits, omitted) = scan_for_hits(&jsonl_path, re, max_hits, search_tools);
+                if hits.is_empty() {
                     continue;
                 }
 
@@ -1239,6 +1258,8 @@ impl SessionReader {
                                 SessionStatus::Stopped
                             },
                             last_activity,
+                            matches: hits,
+                            matches_omitted: omitted,
                         });
                     }
                 } else {
@@ -1320,6 +1341,8 @@ impl SessionReader {
                         } else {
                             last_activity
                         },
+                        matches: hits,
+                        matches_omitted: omitted,
                     });
                 }
             }
@@ -1345,6 +1368,135 @@ impl SessionReader {
 
         matching
     }
+}
+
+/// The readable text of one JSONL record: what a person typed or what Claude
+/// said back. Tool calls, tool results and thinking are skipped unless
+/// `search_tools`, because grepping pasted file contents and command output is
+/// mostly noise.
+fn record_text(data: &Value, search_tools: bool) -> Option<(&'static str, String)> {
+    let role = match data.get("type").and_then(|v| v.as_str()) {
+        Some("user") => "user",
+        Some("assistant") => "assistant",
+        _ => return None,
+    };
+
+    let content = data.get("message")?.get("content")?;
+
+    if let Some(text) = content.as_str() {
+        return Some((role, text.to_string()));
+    }
+
+    let mut out = String::new();
+    for block in content.as_array()? {
+        let part = match block.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "text" => block.get("text").and_then(|v| v.as_str()).map(String::from),
+            "thinking" if search_tools => block
+                .get("thinking")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            "tool_use" if search_tools => block.get("input").map(|v| v.to_string()),
+            "tool_result" if search_tools => block.get("content").map(tool_result_text),
+            _ => None,
+        };
+        if let Some(part) = part {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&part);
+        }
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some((role, out))
+    }
+}
+
+/// A tool result is either a plain string or a list of content blocks.
+fn tool_result_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    match content.as_array() {
+        Some(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => content.to_string(),
+    }
+}
+
+/// Collect the matching lines in one session file, grep style. Returns the
+/// hits that were kept and how many further matches were left behind once
+/// `max_hits` was reached.
+fn scan_for_hits(
+    path: &Path,
+    re: &regex::Regex,
+    max_hits: Option<usize>,
+    search_tools: bool,
+) -> (Vec<SearchHit>, u64) {
+    let Ok(file) = fs::File::open(path) else {
+        return (Vec::new(), 0);
+    };
+
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut omitted = 0u64;
+    let mut message = 0u64;
+
+    for raw in BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let Some((role, text)) = record_text(&data, search_tools) else {
+            continue;
+        };
+        message += 1;
+        // One scan over the whole message is far cheaper than a regex call per
+        // line, and most messages match nothing at all.
+        if !re.is_match(&text) {
+            continue;
+        }
+        let timestamp = str_field(&data, "timestamp");
+
+        for line in text.lines() {
+            let ranges: Vec<(usize, usize)> =
+                re.find_iter(line).map(|m| (m.start(), m.end())).collect();
+            if ranges.is_empty() {
+                continue;
+            }
+            if max_hits.is_some_and(|max| hits.len() >= max) {
+                omitted += 1;
+                continue;
+            }
+            hits.push(SearchHit {
+                message,
+                role: role.to_string(),
+                timestamp: timestamp.clone(),
+                line: line.to_string(),
+                ranges,
+            });
+        }
+    }
+
+    (hits, omitted)
+}
+
+/// `<base>-fork`, then `-fork-2`, `-fork-3`, until `taken` says no.
+fn next_fork_alias(base: &str, taken: &dyn Fn(&str) -> bool) -> String {
+    let first = format!("{base}-fork");
+    if !taken(&first) {
+        return first;
+    }
+    for n in 2.. {
+        let candidate = format!("{base}-fork-{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    first
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -1388,5 +1540,86 @@ mod truncate_tests {
     fn short_strings_pass_through() {
         assert_eq!(truncate("hello", 100), "hello");
         assert_eq!(truncate("héllo—world", 100), "héllo—world");
+    }
+}
+
+#[cfg(test)]
+mod record_text_tests {
+    use super::record_text;
+    use serde_json::json;
+
+    #[test]
+    fn a_plain_user_prompt_is_its_own_text() {
+        let rec = json!({"type": "user", "message": {"content": "write the RFC"}});
+        assert_eq!(
+            record_text(&rec, false),
+            Some(("user", "write the RFC".to_string()))
+        );
+    }
+
+    #[test]
+    fn tool_results_are_skipped_unless_asked_for() {
+        let rec = json!({
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": "RFC 3161"}]}
+        });
+        assert_eq!(record_text(&rec, false), None);
+        assert_eq!(
+            record_text(&rec, true),
+            Some(("user", "RFC 3161".to_string()))
+        );
+    }
+
+    #[test]
+    fn assistant_text_is_searched_but_its_thinking_is_not() {
+        let rec = json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "thinking", "thinking": "hmm"},
+                {"type": "text", "text": "RFC 3161 it is"}
+            ]}
+        });
+        assert_eq!(
+            record_text(&rec, false),
+            Some(("assistant", "RFC 3161 it is".to_string()))
+        );
+        assert_eq!(
+            record_text(&rec, true),
+            Some(("assistant", "hmm\nRFC 3161 it is".to_string()))
+        );
+    }
+
+    #[test]
+    fn records_that_are_not_conversation_are_ignored() {
+        assert_eq!(record_text(&json!({"type": "summary"}), true), None);
+        assert_eq!(record_text(&json!({"type": "user"}), true), None);
+    }
+}
+
+#[cfg(test)]
+mod fork_alias_tests {
+    use super::next_fork_alias;
+
+    #[test]
+    fn an_unused_name_is_taken_as_is() {
+        assert_eq!(next_fork_alias("crt-nis2", &|_| false), "crt-nis2-fork");
+    }
+
+    #[test]
+    fn a_used_name_is_numbered_from_two() {
+        let taken = |name: &str| name == "crt-nis2-fork";
+        assert_eq!(next_fork_alias("crt-nis2", &taken), "crt-nis2-fork-2");
+
+        let taken = |name: &str| matches!(name, "crt-nis2-fork" | "crt-nis2-fork-2");
+        assert_eq!(next_fork_alias("crt-nis2", &taken), "crt-nis2-fork-3");
+    }
+
+    /// A fork of a fork reads as a chain, not as a second fork of the parent.
+    #[test]
+    fn forking_a_fork_keeps_stacking() {
+        assert_eq!(
+            next_fork_alias("crt-nis2-fork", &|_| false),
+            "crt-nis2-fork-fork"
+        );
     }
 }

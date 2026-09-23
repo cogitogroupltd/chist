@@ -1,5 +1,15 @@
 use crate::models::{SessionDetail, SessionSummary};
+use crate::path_utils::shorten_home;
 use comfy_table::{ContentArrangement, Table};
+
+const RESET: &str = "\x1b[0m";
+const C_ID: &str = "\x1b[35m";
+const C_ALIAS: &str = "\x1b[36m";
+const C_DIM: &str = "\x1b[2m";
+const C_HIT: &str = "\x1b[1;31m";
+
+/// Width of the `  role  timestamp  ` gutter in front of every matching line.
+const HIT_INDENT: usize = 30;
 
 pub fn format_list_table(sessions: &[SessionSummary]) -> String {
     if sessions.is_empty() {
@@ -14,11 +24,7 @@ pub fn format_list_table(sessions: &[SessionSummary]) -> String {
     ]);
 
     for session in sessions {
-        let id_short = if session.session_id.len() >= 8 {
-            session.session_id[..8].to_string()
-        } else {
-            session.session_id.clone()
-        };
+        let id_short = short_id(&session.session_id);
 
         let alias = session.slug.as_deref().unwrap_or_default().to_string();
 
@@ -85,6 +91,139 @@ pub fn format_list_table(sessions: &[SessionSummary]) -> String {
     }
 
     table.to_string()
+}
+
+fn short_id(session_id: &str) -> String {
+    match session_id.len() >= 8 {
+        true => session_id[..8].to_string(),
+        false => session_id.to_string(),
+    }
+}
+
+/// Print search results the way `grep -r` does: a heading per session, then
+/// every line that matched underneath it.
+pub fn format_search_results(sessions: &[SessionSummary], color: bool, width: usize) -> String {
+    if sessions.is_empty() {
+        return "No sessions found.".to_string();
+    }
+
+    let paint = |code: &str, text: &str| match color {
+        true => format!("{code}{text}{RESET}"),
+        false => text.to_string(),
+    };
+
+    let budget = width.saturating_sub(HIT_INDENT).max(40);
+    let mut out: Vec<String> = Vec::new();
+
+    for session in sessions {
+        let mut header = paint(C_ID, &short_id(&session.session_id));
+        if let Some(alias) = session.slug.as_deref() {
+            header.push_str("  ");
+            header.push_str(&paint(C_ALIAS, alias));
+        }
+        header.push_str("  ");
+        header.push_str(&paint(C_DIM, &shorten_home(&session.project_path)));
+        out.push(header);
+
+        for hit in &session.matches {
+            let when = if hit.timestamp.len() >= 16 {
+                hit.timestamp[..16].replace('T', " ")
+            } else {
+                String::new()
+            };
+            out.push(format!(
+                "  {:<9} {:<16}  {}",
+                hit.role,
+                when,
+                snippet(&hit.line, &hit.ranges, budget, color)
+            ));
+        }
+
+        if session.matches_omitted > 0 {
+            let plural = if session.matches_omitted == 1 {
+                ""
+            } else {
+                "es"
+            };
+            out.push(paint(
+                C_DIM,
+                &format!(
+                    "  … {} more match{plural} in this session",
+                    session.matches_omitted
+                ),
+            ));
+        }
+
+        out.push(String::new());
+    }
+
+    out.pop();
+    out.join("\n")
+}
+
+/// One matching line, windowed to `budget` characters around the first match
+/// and with the matched spans highlighted — what `grep --color=auto` prints.
+fn snippet(line: &str, ranges: &[(usize, usize)], budget: usize, color: bool) -> String {
+    // Leading indentation carries nothing here, so drop it and shift the match
+    // offsets to suit. Trailing whitespace goes too, which can push an offset
+    // past the end — those spans are dropped.
+    let shift = line.len() - line.trim_start().len();
+    let line = line.trim();
+    let ranges: Vec<(usize, usize)> = ranges
+        .iter()
+        .filter(|(s, _)| *s >= shift)
+        .map(|&(s, e)| (s - shift, e - shift))
+        .filter(|&(s, e)| s < e && e <= line.len())
+        .collect();
+
+    let char_len = line.chars().count();
+    let (start, end) = if char_len <= budget {
+        (0, line.len())
+    } else {
+        let first_match = ranges
+            .first()
+            .map(|&(s, _)| line[..s].chars().count())
+            .unwrap_or(0);
+        let mut first_shown = first_match.saturating_sub(budget / 4);
+        first_shown = first_shown.min(char_len - budget);
+        (
+            byte_at_char(line, first_shown),
+            byte_at_char(line, first_shown + budget),
+        )
+    };
+
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+
+    let mut cursor = start;
+    for &(s, e) in &ranges {
+        let s = s.clamp(start, end).max(cursor);
+        let e = e.clamp(start, end);
+        if e <= s {
+            continue;
+        }
+        out.push_str(&line[cursor..s]);
+        if color {
+            out.push_str(C_HIT);
+        }
+        out.push_str(&line[s..e]);
+        if color {
+            out.push_str(RESET);
+        }
+        cursor = e;
+    }
+    out.push_str(&line[cursor..end]);
+
+    if end < line.len() {
+        out.push('…');
+    }
+    out
+}
+
+fn byte_at_char(s: &str, index: usize) -> usize {
+    s.char_indices().nth(index).map_or(s.len(), |(i, _)| i)
 }
 
 pub fn format_list_json(sessions: &[SessionSummary]) -> String {
@@ -302,4 +441,46 @@ fn format_number(n: u64) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::snippet;
+
+    fn hits(line: &str, needle: &str) -> Vec<(usize, usize)> {
+        line.match_indices(needle)
+            .map(|(i, m)| (i, i + m.len()))
+            .collect()
+    }
+
+    #[test]
+    fn short_lines_print_whole_and_untrimmed_offsets_still_line_up() {
+        let line = "   we should follow RFC 3161 here   ";
+        let out = snippet(line, &hits(line, "RFC"), 80, true);
+        assert_eq!(out, "we should follow \x1b[1;31mRFC\x1b[0m 3161 here");
+    }
+
+    #[test]
+    fn long_lines_window_around_the_first_match() {
+        let line = format!("{} RFC {}", "a".repeat(400), "b".repeat(400));
+        let out = snippet(&line, &hits(&line, "RFC"), 60, false);
+        assert!(out.starts_with('…') && out.ends_with('…'));
+        assert!(out.contains("RFC"));
+        // The ellipses are the only characters beyond the budget.
+        assert_eq!(out.chars().count(), 62);
+    }
+
+    #[test]
+    fn every_match_on_the_line_is_highlighted() {
+        let line = "RFC, then RFC again";
+        let out = snippet(line, &hits(line, "RFC"), 80, true);
+        assert_eq!(out.matches("\x1b[1;31m").count(), 2);
+    }
+
+    #[test]
+    fn multibyte_lines_do_not_panic() {
+        let line = format!("{}— RFC —{}", "é".repeat(200), "ü".repeat(200));
+        let out = snippet(&line, &hits(&line, "RFC"), 50, false);
+        assert!(out.contains("RFC"));
+    }
 }

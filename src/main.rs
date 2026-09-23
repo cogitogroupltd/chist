@@ -11,7 +11,8 @@ use backup::human_days;
 use clap::{Parser, Subcommand};
 use config::{Config, RestoreMode};
 use formatters::{
-    format_detail_json, format_detail_text, format_detail_yaml, format_list_json, format_list_table,
+    format_detail_json, format_detail_text, format_detail_yaml, format_list_json,
+    format_list_table, format_search_results,
 };
 use session_reader::SessionReader;
 use std::fs::File;
@@ -34,8 +35,11 @@ use std::time::Duration;
   chist list --project cog                # Filter by project name
   chist list -f json                      # Output as JSON
   chist list -a                           # Include /tmp sessions
-  chist list -i 'search string'           # Search sessions (case-insensitive)
+  chist list -i 'search string'           # Grep every session, grep-style output
   chist list -i '(regex|pattern)' --regex # Search with regex
+  chist list -i 'RFC' -m 0                # ...show every match, not just the first few
+  chist list -i 'RFC' --tools             # ...search tool calls and output too
+  chist list -i 'RFC' -f table            # ...just the session table, no matching lines
   chist get --last                        # Get latest session
   chist get lively-cooking-hejlsberg      # Get by slug
   chist get 3f4b4b02                      # Get by UUID prefix
@@ -43,6 +47,7 @@ use std::time::Duration;
   eval $(chist exec 3f4b4b02)              # Same, by UUID prefix
   chist ls -i 'search string' | chist -r    # Resume the first match
   chist ls -i 'search string' | chist exec  # Same, spelled as the subcommand
+  chist -rf my-alias                       # Fork it instead, named <alias>-fork
   chist -r my-alias -e 'git status'        # Run one prompt non-interactively
   chist backup                             # Back up now
   chist backup --status                    # When the last backup ran
@@ -63,12 +68,28 @@ struct Cli {
     )]
     resume: Option<String>,
 
+    /// Fork the session being resumed into a new one (use with -r)
+    #[arg(short = 'f', long = "fork", requires = "resume")]
+    fork: bool,
+
     /// Execute a single prompt non-interactively (use with -r)
     #[arg(short = 'e', long = "execute", requires = "resume")]
     execute: Option<String>,
 
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+/// clap reads `-rf` as `-r` with the value `f`, because `-r` takes an optional
+/// value — which silently resumed whatever session happened to match "f".
+/// Split the cluster by hand, with `-f` first so `-r` is still free to take the
+/// id that follows it.
+fn split_resume_fork(args: impl Iterator<Item = String>) -> Vec<String> {
+    args.flat_map(|arg| match arg.as_str() {
+        "-rf" | "-fr" => vec!["-f".to_string(), "-r".to_string()],
+        _ => vec![arg],
+    })
+    .collect()
 }
 
 #[derive(Subcommand)]
@@ -96,8 +117,16 @@ enum Commands {
         #[arg(long = "regex")]
         regex: bool,
 
-        /// Output format
-        #[arg(short, long, value_parser = ["table", "json"])]
+        /// Matching lines to show per session (0 for all)
+        #[arg(short = 'm', long = "max-matches", default_value_t = 5)]
+        max_matches: usize,
+
+        /// Also search tool calls, tool output and thinking, not just what was said
+        #[arg(long = "tools")]
+        tools: bool,
+
+        /// Output format. Defaults to grep with -i, table otherwise.
+        #[arg(short, long, value_parser = ["table", "json", "grep"])]
         format: Option<String>,
 
         /// Include sessions from /tmp directories
@@ -115,7 +144,8 @@ enum Commands {
         #[arg(short, long)]
         last: bool,
 
-        /// Fork the session instead of resuming in-place
+        /// Fork the session instead of resuming in-place. The fork is named
+        /// after its parent so the two are told apart in the listing.
         #[arg(short, long)]
         fork: bool,
 
@@ -178,9 +208,9 @@ enum Commands {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(split_resume_fork(std::env::args()));
 
-    // -r <id> is a shorthand for `exec <id>`
+    // -r <id> is a shorthand for `exec <id>`, and -rf for `exec <id> --fork`.
     if let Some(ref id) = cli.resume {
         let config = Config::load(cli.config.as_deref());
         backup::maybe_spawn(&config);
@@ -188,7 +218,7 @@ fn main() {
             &config,
             Some(id.clone()),
             false,
-            false,
+            cli.fork,
             false,
             cli.execute.as_deref(),
         );
@@ -215,9 +245,24 @@ fn main() {
             project,
             search,
             regex,
+            max_matches,
+            tools,
             format,
             all,
-        } => cmd_list(&config, pattern, limit, project, search, regex, format, all),
+        } => cmd_list(
+            &config,
+            ListArgs {
+                pattern,
+                limit,
+                project,
+                search,
+                use_regex: regex,
+                max_matches,
+                tools,
+                format,
+                include_tmp: all,
+            },
+        ),
         Commands::Exec {
             id_or_slug,
             last,
@@ -313,26 +358,32 @@ fn cmd_exec(
     let resume_dir = project_path;
 
     // Output shell commands to stdout for eval
+    let mut cmd = format!("cd {} && claude", shell_escape(&resume_dir));
+
+    if fork {
+        // `claude` has no `-f`: it reads `-rf <id>` as `-r f` with `<id>` as a
+        // prompt, so the long flag is the only spelling that actually forks.
+        // The fork also inherits its parent's title, which would put two
+        // different sessions in the list under one alias — name it as it is
+        // made instead.
+        let parent = reader
+            .alias_for(&session_id, &resume_dir)
+            .unwrap_or_else(|| session_id.chars().take(8).collect());
+        cmd.push_str(" --fork-session --name ");
+        cmd.push_str(&shell_escape(&reader.free_fork_alias(&parent)));
+    }
+
+    cmd.push_str(" -r ");
+    cmd.push_str(&shell_escape(&session_id));
+
+    if let Some(prompt) = execute {
+        cmd.push_str(" -p ");
+        cmd.push_str(&shell_escape(prompt));
+    }
+
     let out = io::stdout();
     let mut out = out.lock();
-    if let Some(prompt) = execute {
-        let _ = writeln!(
-            out,
-            "cd {} && claude {} {} -p {}",
-            shell_escape(&resume_dir),
-            if fork { "-rf" } else { "-r" },
-            shell_escape(&session_id),
-            shell_escape(prompt),
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "cd {} && claude {} {}",
-            shell_escape(&resume_dir),
-            if fork { "-rf" } else { "-r" },
-            shell_escape(&session_id),
-        );
-    }
+    let _ = writeln!(out, "{cmd}");
 }
 
 /// Resolve an id/slug to (session_id, project_path) using the detail lookup
@@ -395,19 +446,42 @@ fn session_matches(m: &dyn Fn(&str) -> bool, id: &str, alias: Option<&str>, path
     m(id) || alias.is_some_and(|a| m(a)) || m(path)
 }
 
-fn cmd_list(
-    config: &Config,
+struct ListArgs {
     pattern: Option<String>,
     limit: Option<usize>,
     project: Option<String>,
     search: Option<String>,
     use_regex: bool,
+    max_matches: usize,
+    tools: bool,
     format: Option<String>,
     include_tmp: bool,
-) {
+}
+
+fn cmd_list(config: &Config, args: ListArgs) {
+    let ListArgs {
+        pattern,
+        limit,
+        project,
+        search,
+        use_regex,
+        max_matches,
+        tools,
+        format,
+        include_tmp,
+    } = args;
+
     let reader = SessionReader::new(&config.claude_home);
     let limit = limit.unwrap_or(config.default_list_limit);
-    let output_format = format.as_deref().unwrap_or(&config.default_format);
+
+    // A search prints its matching lines by default; a plain listing has none
+    // to print, so it falls back to the table.
+    let default_format = if search.is_some() {
+        "grep"
+    } else {
+        &config.default_format
+    };
+    let output_format = format.as_deref().unwrap_or(default_format);
 
     // The limit counts what matched, so with a pattern the reader hands back
     // everything and the cut happens after filtering.
@@ -421,6 +495,8 @@ fn cmd_list(
             fetch_limit,
             config.allowed_projects.as_deref(),
             include_tmp,
+            (max_matches > 0).then_some(max_matches),
+            tools,
         )
     } else {
         reader.list_sessions(
@@ -451,8 +527,21 @@ fn cmd_list(
 
     match output_format {
         "json" => println!("{}", format_list_json(&sessions)),
+        "grep" => println!(
+            "{}",
+            format_search_results(&sessions, io::stdout().is_terminal(), terminal_width())
+        ),
         _ => println!("{}", format_list_table(&sessions)),
     }
+}
+
+/// Terminal columns, for windowing long matching lines. Falls back to a width
+/// that suits most terminals when stdout is not one.
+fn terminal_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(cols, _)| cols as usize)
+        .unwrap_or(120)
+        .max(60)
 }
 
 fn cmd_get(
@@ -920,6 +1009,19 @@ mod stdin_tests {
         assert_eq!(first_session_id("No sessions found.\n"), None);
         assert_eq!(first_session_id(" ID  Alias  Project\n"), None);
     }
+
+    /// `chist ls -i foo | chist -r` has to keep working now that a search
+    /// prints matching lines instead of a table.
+    #[test]
+    fn takes_the_id_out_of_grep_output() {
+        let grep = "18a30377  crt-nis2  ~/dev/myco/api\n\
+  user      2026-09-16 21:38  we should follow RFC 3161 here\n\
+  assistant 2026-09-16 21:39  RFC 3161 it is\n\
+\n\
+7a03dcb7  ~/dev/myco/web\n\
+  user      2026-09-15 09:02  the RFC says otherwise\n";
+        assert_eq!(first_session_id(grep).as_deref(), Some("18a30377"));
+    }
 }
 
 #[cfg(test)]
@@ -1060,5 +1162,48 @@ mod hint_tests {
     #[test]
     fn a_reaped_session_is_restored() {
         assert_eq!(hint_for(false, "b959d3a5"), "chist restore b959d3a5");
+    }
+}
+
+#[cfg(test)]
+mod resume_fork_tests {
+    use super::{Cli, split_resume_fork};
+    use clap::Parser;
+
+    fn parse(argv: &[&str]) -> Cli {
+        let args = split_resume_fork(argv.iter().map(|a| a.to_string()));
+        Cli::parse_from(args)
+    }
+
+    #[test]
+    fn rf_resumes_and_forks_rather_than_resuming_a_session_called_f() {
+        for spelling in [["chist", "-rf", "my-alias"], ["chist", "-fr", "my-alias"]] {
+            let cli = parse(&spelling);
+            assert!(cli.fork);
+            assert_eq!(cli.resume.as_deref(), Some("my-alias"));
+        }
+    }
+
+    #[test]
+    fn bare_rf_still_reads_the_session_from_stdin() {
+        let cli = parse(&["chist", "-rf"]);
+        assert!(cli.fork);
+        assert_eq!(cli.resume.as_deref(), Some("-"));
+    }
+
+    #[test]
+    fn plain_resume_does_not_fork() {
+        let cli = parse(&["chist", "-r", "my-alias"]);
+        assert!(!cli.fork);
+        assert_eq!(cli.resume.as_deref(), Some("my-alias"));
+    }
+
+    /// Only the cluster itself splits; a session actually named `rf` is still
+    /// reachable.
+    #[test]
+    fn a_value_that_reads_like_the_cluster_is_left_alone() {
+        let cli = parse(&["chist", "-r", "rf"]);
+        assert!(!cli.fork);
+        assert_eq!(cli.resume.as_deref(), Some("rf"));
     }
 }

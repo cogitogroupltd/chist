@@ -22,6 +22,19 @@ impl fmt::Display for SessionStatus {
     }
 }
 
+/// One matching line found by a `-i` search, with the byte ranges inside
+/// `line` that the pattern hit so the formatter can highlight them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchHit {
+    /// 1-based position of the message within the session.
+    pub message: u64,
+    /// "user" or "assistant".
+    pub role: String,
+    pub timestamp: String,
+    pub line: String,
+    pub ranges: Vec<(usize, usize)>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub session_id: String,
@@ -41,6 +54,16 @@ pub struct SessionSummary {
     pub status: SessionStatus,
     #[serde(default)]
     pub last_activity: String,
+    /// Lines that matched a `-i` search. Empty for a plain listing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matches: Vec<SearchHit>,
+    /// Matches found beyond the ones kept in `matches` (see `--max-matches`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub matches_omitted: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl SessionSummary {

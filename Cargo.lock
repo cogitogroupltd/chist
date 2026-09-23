@@ -111,6 +111,7 @@ dependencies = [
  "chrono",
  "clap",
  "comfy-table",
+ "crossterm",
  "dirs",
  "glob",
  "regex",

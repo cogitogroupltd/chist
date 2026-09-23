@@ -40,20 +40,33 @@ Newest activity first. The `Status` column shows `Running` if a `claude` process
 
 ### Search by content
 
-`-i` matches the JSONL contents of every session — first prompt, every message, summary. Add `--regex` for a regex.
+`-i` greps every session and prints the lines that matched, the way `grep -r` does: a heading per session, then the hits underneath it. Add `--regex` for a regex.
 
 ```
 $ chist list -i 'redis migration'
- ID        Alias                  Project                Branch   Status   Size     Msgs  Updated           Last Msg
- c00abb55  redis-migration-bug    ~/dev/myco/api         main     Running  911.5KB  401   2026-05-09 12:17  ok push it
- 6ca5dc20  cache-rewrite          ~/dev/myco/api         main              4.1MB    1399  2026-05-04 11:22  rolled back, see incident #482
+c00abb55  redis-migration-bug  ~/dev/myco/api
+  user      2026-05-08 09:14  can you plan the redis migration for staging
+  assistant 2026-05-08 09:15  Here is the redis migration in three steps:
+  user      2026-05-09 12:17  ok push it
+  … 4 more matches in this session
 
-$ chist list -i '(redis|postgres) migration' --regex
+6ca5dc20  cache-rewrite  ~/dev/myco/api
+  user      2026-05-04 10:58  …this is the same redis migration problem as last…
+```
+
+It searches what was said — your prompts and Claude's replies. Tool calls, tool output and thinking are left out, because grepping pasted file contents is mostly noise; `--tools` puts them back in.
+
+Five matching lines per session are shown. `-m 20` shows more, `-m 0` shows every one. `-f table` gives the plain session table instead, and `-f json` carries the matches along with their offsets.
+
+```
+$ chist list -i '(redis|postgres) migration' --regex -f table
  ID        Alias                  Project                Branch   Status   Size     Msgs  Updated           Last Msg
  c00abb55  redis-migration-bug    ~/dev/myco/api         main     Running  911.5KB  401   2026-05-09 12:17  ok push it
  b28ffd10  postgres-upgrade-plan  ~/work/billing         main              1.8MB    660   2026-05-08 22:04  let's stage this on prod-replica first
  6ca5dc20  cache-rewrite          ~/dev/myco/api         main              4.1MB    1399  2026-05-04 11:22  rolled back, see incident #482
 ```
+
+The session id still leads each heading, so `chist ls -i 'redis migration' | chist -r` resumes the first match as before.
 
 ### Inspect a single session
 
@@ -124,12 +137,26 @@ $ chist -r c00abb55 -e 'summarise what we changed'
 cd ~/dev/myco/api && claude -r c00abb55-5251-4db9-a6bb-8d72ea832873 -p 'summarise what we changed'
 ```
 
+### Fork instead of resuming
+
+`-f` branches the conversation into a new session rather than continuing the old one, so the original stays where you left it. `-rf` is the short spelling, and works everywhere `-r` does, including at the end of a pipe.
+
+```
+$ chist -rf redis-migration-bug
+cd ~/dev/myco/api && claude --fork-session --name redis-migration-bug-fork -r c00abb55-5251-4db9-a6bb-8d72ea832873
+
+$ chist ls -i 'redis migration' | chist -rf
+# forks the first match
+```
+
+The fork is named as it is made. Left alone it would inherit its parent's title and the two would sit in the listing under one name, which is no help at all when you come back to them a week later. It takes the parent's alias with `-fork` on the end, numbered `-fork-2`, `-fork-3` if that is already in use. `/rename` inside Claude changes it to something better.
+
 If you don't want to type `eval` every time, drop a small wrapper into your shell:
 
 ```
 chist() {
   case "$1" in
-    exec|-r|--resume)
+    exec|-r|-rf|-fr|--resume)
       local cmd; cmd=$(command chist "$@")
       [[ -n "$cmd" ]] && eval "$cmd" ;;
     *) command chist "$@" ;;
